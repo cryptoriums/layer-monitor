@@ -1,0 +1,594 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Max Profit - Tellor Reporter &amp; Validator</title>
+
+  <!-- Fonts -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link
+    href="https://fonts.googleapis.com/css2?family=Poppins:wght@400;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap"
+    rel="stylesheet">
+
+  <!-- Tailwind CSS -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          fontFamily: {
+            sans: ['Poppins', 'ui-sans-serif', 'system-ui'],
+            mono: ['JetBrains Mono', 'ui-monospace', 'monospace']
+          },
+          colors: {
+            'brand-red': '#E34B4B',
+            'brand-red-dark': '#C93737',
+            'brand-blue': '#4C6FFF',
+          }
+        }
+      }
+    }
+  </script>
+
+  <!-- Custom Styles -->
+  <link rel="stylesheet" href="/assets/style.css">
+</head>
+
+<body>
+  <!-- Navigation -->
+  <header class="header">
+    <div class="container">
+      <nav class="nav">
+        <div class="logo">
+          <div class="logo-icon">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+              <path d="M12 2L4 5.5V11.5C4 16.19 7.4 20.56 12 22C16.6 20.56 20 16.19 20 11.5V5.5L12 2Z" fill="white"
+                opacity="0.9" />
+              <path d="M9 12L11 14L15 10" stroke="#8B1538" stroke-width="2" stroke-linecap="round"
+                stroke-linejoin="round" />
+            </svg>
+          </div>
+          <span>Max Profit</span>
+        </div>
+
+        <!-- Hamburger Button (Mobile) -->
+        <button class="hamburger" onclick="toggleMenu()" aria-label="Toggle menu">
+          <span></span>
+          <span></span>
+          <span></span>
+        </button>
+
+        <div class="nav-links">
+          <a href="#infrastructure" class="nav-link">Infrastructure</a>
+          <a href="#network" class="nav-link">Network</a>
+          <a href="#hierarchy" class="nav-link">Hierarchy</a>
+          {{if .OurValidatorAddr}}
+          <a href="#" class="btn btn-primary" onclick="event.preventDefault(); openDelegateModal();">Delegate</a>
+          {{end}}
+        </div>
+      </nav>
+    </div>
+  </header>
+
+  <!-- Hero Section -->
+  <section class="section hero">
+    <div class="container hero-grid">
+
+      <!-- LEFT -->
+      <div class="hero-content">
+
+
+        <h1>
+          Launch offer <br /> <span class="percent-boost">0%</span> commission <br />
+          for 12 months<br>
+        </h1>
+
+
+
+        <p class="kicker">
+          Built and run by ex-Tellor insider
+        </p>
+
+        <ul class="bullets">
+          <li>Reporting since {{.OperatorStartYear}} ({{.ExperienceYears}}+ years)</li>
+          <li>Zero incidents since day one</li>
+          <li>Enterprise-grade monitoring</li>
+          <li>Redundant, jail-resistant infra</li>
+        </ul>
+
+        {{if .OurValidatorAddr}}
+        <div class="actions">
+          <button class="btn btn-primary" onclick="openDelegateModal()">Single click delegation</button>
+        </div>
+        {{end}}
+
+        <a href="#infrastructure" class="view-link">
+          View infrastructure details
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none">
+            <path d="M5 12h14M12 5l7 7-7 7" stroke="currentColor" stroke-width="2" stroke-linecap="round"
+              stroke-linejoin="round" />
+          </svg>
+        </a>
+      </div>
+
+      <!-- RIGHT -->
+      <div class="dashboard-wrapper">
+        <svg viewBox="0 0 420 340" width="100%" height="auto" role="img" aria-label="Rewards dashboard mock"
+          class="dashboard-svg">
+          <style>
+            .poppins {
+              font-family: 'Poppins', ui-sans-serif, system-ui, sans-serif;
+            }
+          </style>
+          <defs>
+            <linearGradient id="dashBg" x1="0" y1="0" x2="1" y2="1">
+              <stop offset="0" stop-color="#151520" />
+              <stop offset="1" stop-color="#0a0a10" />
+            </linearGradient>
+            <linearGradient id="barGrad" x1="0" y1="1" x2="0" y2="0">
+              <stop offset="0" stop-color="#8B1538" />
+              <stop offset="1" stop-color="#C62839" />
+            </linearGradient>
+            <linearGradient id="barGradLight" x1="0" y1="1" x2="0" y2="0">
+              <stop offset="0" stop-color="#8B1538" stop-opacity="0.6" />
+              <stop offset="1" stop-color="#C62839" stop-opacity="0.8" />
+            </linearGradient>
+            <linearGradient id="coinGrad" x1="0" y1="0" x2="0" y2="1">
+              <stop offset="0" stop-color="#FFD700" />
+              <stop offset="1" stop-color="#FFA500" />
+            </linearGradient>
+            <filter id="glow" x="-50%" y="-50%" width="200%" height="200%">
+              <feGaussianBlur stdDeviation="6" result="blur" />
+              <feMerge>
+                <feMergeNode in="blur" />
+                <feMergeNode in="SourceGraphic" />
+              </feMerge>
+            </filter>
+            <filter id="cardShadow" x="-20%" y="-20%" width="140%" height="160%">
+              <feDropShadow dx="0" dy="16" stdDeviation="20" flood-color="rgba(0,0,0,.5)" />
+            </filter>
+            <filter id="coinGlow" x="-100%" y="-100%" width="300%" height="300%">
+              <feGaussianBlur stdDeviation="3" result="blur" />
+              <feMerge>
+                <feMergeNode in="blur" />
+                <feMergeNode in="SourceGraphic" />
+              </feMerge>
+            </filter>
+          </defs>
+
+          <!-- Card -->
+          <g filter="url(#cardShadow)">
+            <rect x="16" y="16" width="388" height="308" rx="18" fill="url(#dashBg)" stroke="rgba(255,255,255,0.06)"
+              stroke-width="1" />
+
+            <!-- Header -->
+            <text x="36" y="52" fill="rgba(255,255,255,0.95)" font-size="17" font-weight="600" class="poppins">Max
+              Profit</text>
+
+            <!-- Stat pills -->
+            <g>
+              <rect x="200" y="34" width="180" height="28" rx="14" fill="rgba(139,21,56,0.15)"
+                stroke="rgba(198,40,57,0.3)" stroke-width="1" />
+
+              <text x="250" y="53" fill="#C62839" font-size="11" font-weight="600" class="poppins">
+                <tspan class="percent-boost">0%</tspan> commission
+              </text>
+
+            </g>
+
+            <!-- Chart container -->
+            <rect x="36" y="76" width="348" height="200" rx="12" fill="rgba(0,0,0,0.25)" stroke="rgba(255,255,255,0.04)"
+              stroke-width="1" />
+
+            <!-- Y-axis labels -->
+            <text x="46" y="100" fill="rgba(255,255,255,0.3)" font-size="9" class="poppins">100</text>
+            <text x="46" y="140" fill="rgba(255,255,255,0.3)" font-size="9" class="poppins">75</text>
+            <text x="46" y="180" fill="rgba(255,255,255,0.3)" font-size="9" class="poppins">50</text>
+            <text x="46" y="220" fill="rgba(255,255,255,0.3)" font-size="9" class="poppins">25</text>
+            <text x="46" y="260" fill="rgba(255,255,255,0.3)" font-size="9" class="poppins">0</text>
+
+            <!-- Grid lines -->
+            <g stroke="rgba(255,255,255,0.04)" stroke-width="1">
+              <line x1="70" y1="96" x2="372" y2="96" />
+              <line x1="70" y1="136" x2="372" y2="136" />
+              <line x1="70" y1="176" x2="372" y2="176" />
+              <line x1="70" y1="216" x2="372" y2="216" />
+              <line x1="70" y1="256" x2="372" y2="256" />
+            </g>
+
+            <!-- Bar chart with glow -->
+            <g filter="url(#glow)">
+              <rect x="82" y="220" width="30" height="36" rx="4" fill="url(#barGradLight)" />
+              <rect x="124" y="196" width="30" height="60" rx="4" fill="url(#barGradLight)" />
+              <rect x="166" y="172" width="30" height="84" rx="4" fill="url(#barGrad)" opacity="0.85" />
+              <rect x="208" y="148" width="30" height="108" rx="4" fill="url(#barGrad)" opacity="0.9" />
+              <rect x="250" y="128" width="30" height="128" rx="4" fill="url(#barGrad)" opacity="0.95" />
+              <rect x="292" y="112" width="30" height="144" rx="4" fill="url(#barGrad)" />
+              <rect x="334" y="96" width="30" height="160" rx="4" fill="url(#barGrad)" />
+            </g>
+
+
+            <!-- X-axis labels -->
+            <g fill="rgba(255,255,255,0.35)" font-size="9" class="poppins">
+              <text x="90" y="272" text-anchor="middle">Mon</text>
+              <text x="132" y="272" text-anchor="middle">Tue</text>
+              <text x="174" y="272" text-anchor="middle">Wed</text>
+              <text x="216" y="272" text-anchor="middle">Thu</text>
+              <text x="258" y="272" text-anchor="middle">Fri</text>
+              <text x="300" y="272" text-anchor="middle">Sat</text>
+              <text x="342" y="272" text-anchor="middle">Sun</text>
+            </g>
+
+            <!-- Legend -->
+            <g>
+              <rect x="180" y="290" width="10" height="10" rx="2" fill="url(#barGrad)" />
+              <text x="195" y="299" fill="rgba(255,255,255,0.6)" font-size="11" class="poppins">Daily Rewards</text>
+            </g>
+
+          </g>
+        </svg>
+      </div>
+
+    </div>
+  </section>
+
+  <!-- Verified Addresses Section -->
+  {{if .OurReporterAddr}}
+  <section class="section">
+    <div class="container">
+      <div class="verified-section">
+
+
+        <h3>Trusted Partner</h3>
+
+
+        <div class="addresses-grid">
+          <!-- Reporter Address -->
+          <div class="address-card">
+            <div class="address-header">
+              <div class="address-type">
+                <div class="address-type-icon red">
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                    <path d="M12 2L2 7V17L12 22L22 17V7L12 2Z" stroke="currentColor" stroke-width="2" />
+                  </svg>
+                </div>
+                <span class="address-type-label">Reporter</span>
+              </div>
+              <button class="copy-btn" onclick="copyToClipboard('{{.OurReporterAddr}}')" title="Copy Address">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                  <rect x="9" y="9" width="13" height="13" rx="2" stroke="currentColor" stroke-width="2" />
+                  <path d="M5 15H4C2.89543 15 2 14.1046 2 13V4C2 2.89543 2.89543 2 4 2H13C14.1046 2 15 2.89543 15 4V5"
+                    stroke="currentColor" stroke-width="2" />
+                </svg>
+              </button>
+            </div>
+            <div class="address-info">
+              <div class="address-field">
+                <div class="address-field-label">Moniker</div>
+                <div class="address-field-value">{{.OurMoniker}}</div>
+              </div>
+              <div class="address-field">
+                <div class="address-field-label">Address</div>
+                <div class="address-field-value mono">{{.OurReporterAddr}}</div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Validator Address -->
+          {{if .OurValidatorAddr}}
+          <div class="address-card">
+            <div class="address-header">
+              <div class="address-type">
+                <div class="address-type-icon blue">
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                    <rect x="3" y="3" width="7" height="7" rx="1" stroke="currentColor" stroke-width="2" />
+                    <rect x="14" y="3" width="7" height="7" rx="1" stroke="currentColor" stroke-width="2" />
+                    <rect x="14" y="14" width="7" height="7" rx="1" stroke="currentColor" stroke-width="2" />
+                    <rect x="3" y="14" width="7" height="7" rx="1" stroke="currentColor" stroke-width="2" />
+                  </svg>
+                </div>
+                <span class="address-type-label">Validator</span>
+              </div>
+              <button class="copy-btn" onclick="copyToClipboard('{{.OurValidatorAddr}}')" title="Copy Address">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                  <rect x="9" y="9" width="13" height="13" rx="2" stroke="currentColor" stroke-width="2" />
+                  <path d="M5 15H4C2.89543 15 2 14.1046 2 13V4C2 2.89543 2.89543 2 4 2H13C14.1046 2 15 2.89543 15 4V5"
+                    stroke="currentColor" stroke-width="2" />
+                </svg>
+              </button>
+            </div>
+            <div class="address-info">
+              <div class="address-field">
+                <div class="address-field-label">Moniker</div>
+                <div class="address-field-value">{{.OurMoniker}}</div>
+              </div>
+              <div class="address-field">
+                <div class="address-field-label">Address</div>
+                <div class="address-field-value mono">{{.OurValidatorAddr}}</div>
+              </div>
+            </div>
+          </div>
+          {{end}}
+        </div>
+      </div>
+    </div>
+  </section>
+  {{end}}
+
+  <!-- Premium Features Section -->
+  <section id="infrastructure" class="section">
+    <div class="container">
+      <div class="section-header">
+        <h2>Featured</h2>
+        <p>Enterprise-grade infrastructure</p>
+      </div>
+      <div class="card-grid">
+        <!-- Reporter Address -->
+        <div class="card">
+          <div class="card-header">
+            <div class="card-icon">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none">
+                <path d="M12 2l7 4v12l-7 4-7-4V6l7-4z" stroke="#E34B4B" stroke-width="1.8" />
+              </svg>
+            </div>
+            <div class="card-title">Proactive alerting</div>
+          </div>
+          <div class="card-body">Anomalies are flagged before they become incidents</div>
+        </div>
+
+        <!-- Health & Tracking -->
+        <div class="card card-blue">
+          <div class="card-header">
+            <div class="card-icon">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none">
+                <path d="M12 2.5l7 3.2v6.3c0 5-3 8.7-7 9.9-4-1.2-7-4.9-7-9.9V5.7l7-3.2z" stroke="#4C6FFF"
+                  stroke-width="2" />
+              </svg>
+            </div>
+            <div class="card-title">Health &amp; Tracking</div>
+          </div>
+          <div class="card-body">All aspects of our validator infra are constantly monitored for uptime, performance,
+            and reliability.</div>
+        </div>
+
+        <!-- Veteran Team -->
+        <div class="card">
+          <div class="card-header">
+            <div class="card-icon">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none">
+                <circle cx="12" cy="8" r="4" stroke="#E34B4B" stroke-width="2" />
+                <path d="M4 20c0-4 4-6 8-6s8 2 8 6" stroke="#E34B4B" stroke-width="2" stroke-linecap="round" />
+              </svg>
+            </div>
+            <div class="card-title">Redundant infra & failover</div>
+          </div>
+          <div class="card-body">built to avoid jail time and missed blocks</div>
+        </div>
+
+        <!-- Secure Delegation -->
+        <div class="card card-blue">
+          <div class="card-header">
+            <div class="card-icon">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none">
+                <path d="M12 2.5l7 3.2v6.3c0 5-3 8.7-7 9.9-4-1.2-7-4.9-7-9.9V5.7l7-3.2z" stroke="#4C6FFF"
+                  stroke-width="2" />
+                <path d="M9 12l2 2 4-4" stroke="#4C6FFF" stroke-width="2" stroke-linecap="round"
+                  stroke-linejoin="round" />
+              </svg>
+            </div>
+            <div class="card-title">Security first</div>
+          </div>
+          <div class="card-body">Your delegations are safe; with fully encrypted key management for maximum security.
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Network Statistics -->
+  <section id="network" class="section">
+    <div class="container">
+      <div class="text-center mb-4" style="margin-bottom: 32px;">
+        <h2 style="font-size: 32px; font-weight: 800; color: var(--text); margin-bottom: 12px;">Network
+          Statistics ({{.Period}})</h2>
+      </div>
+
+      <div class="stats-grid">
+        <div class="stat-card">
+          <div class="stat-label">Rewards Reporting</div>
+          <div class="stat-split">
+            <div class="stat-block">
+              <div class="stat-sub">Total</div>
+              <div class="stat-value" style="color: rgb(27, 238, 27);">{{.TotalReporting}}</div>
+            </div>
+            <div class="stat-block">
+              <div class="stat-sub">Our</div>
+              <div class="stat-value">{{.OurReporting}}</div>
+            </div>
+          </div>
+        </div>
+
+        <div class="stat-card">
+          <div class="stat-label">Rewards Validating</div>
+          <div class="stat-split">
+            <div class="stat-block">
+              <div class="stat-sub">Total</div>
+              <div class="stat-value" style="color: rgb(27, 238, 27);">{{.TotalValidating }}</div>
+            </div>
+            <div class="stat-block">
+              <div class="stat-sub">Our</div>
+              <div class="stat-value">{{.OurValidating}}</div>
+            </div>
+          </div>
+        </div>
+
+      </div>
+    </div>
+  </section>
+
+  <!-- Network Hierarchy -->
+  <section id="hierarchy" class="section">
+    <div class="container">
+      <div class="hierarchy-header">
+        <h2>Network Hierarchy</h2>
+        <p>Explore the operational structure of our validation network. Transparent reporting on Validators, Reporters,
+          and Selectors.</p>
+
+        <div class="hierarchy-controls">
+          <span class="cache-time">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"
+              style="display: inline; vertical-align: middle; margin-right: 4px;">
+              <circle cx="12" cy="12" r="10" stroke="currentColor" stroke-width="2" />
+              <path d="M12 6v6l4 2" stroke="currentColor" stroke-width="2" stroke-linecap="round" />
+            </svg>
+            Cached <span id="cacheTime">{{.TreeCacheTime}}</span>
+          </span>
+          <button class="refresh-btn" onclick="refreshTree()" id="refreshBtn">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+              <path d="M21.5 2v6h-6M2.5 22v-6h6M2 11.5a10 10 0 0 1 18.8-4.3M22 12.5a10 10 0 0 1-18.8 4.2"
+                stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" />
+            </svg>
+            <span>Refresh</span>
+          </button>
+        </div>
+      </div>
+
+      <div id="treeContainer">
+        <div id="treeLoading"
+          style="display: flex; align-items: center; justify-content: center; gap: 12px; padding: 100px 20px; color: var(--text-muted);">
+          <div class="spinner"></div>
+          <span>Loading hierarchy data...</span>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- CTA Section -->
+  {{if .OurValidatorAddr}}
+  <section class="section cta-section">
+    <div class="container text-center">
+      <h2 class="cta-title">Have a question? msg me on Discord</h2>
+      <p class="cta-subtitle">Let's grow the Tellor rewards together.</p>
+      <button class="btn btn-primary btn-lg" onclick="openDelegateModal()">
+        Single click delegation
+      </button>
+      <div class="cta-link">
+        <a href="#infrastructure" class="view-link">
+          View infrastructure details
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none">
+            <path d="M5 12h14M12 5l7 7-7 7" stroke="currentColor" stroke-width="2" stroke-linecap="round"
+              stroke-linejoin="round" />
+          </svg>
+        </a>
+      </div>
+    </div>
+  </section>
+  {{end}}
+
+
+  <!-- Delegation Modal -->
+  <div class="modal" id="delegateModal">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h3>Delegate & Select Reporter</h3>
+        <p>Enter the amount of TRB. This will delegate to our validator and select our reporter in a single transaction
+          (1 click).</p>
+      </div>
+
+      <div class="modal-body">
+        <div class="stake-info" id="stakeInfo">
+          <div style="text-align: center; padding: 20px; color: var(--text-muted);">Loading requirements...</div>
+        </div>
+
+        <label for="delegateAmount" class="form-label">Amount (TRB)</label>
+        <input type="text" id="delegateAmount" placeholder="0" inputmode="decimal" autocomplete="off"
+          class="form-input">
+      </div>
+
+      <div class="modal-actions">
+        <button class="btn btn-secondary" onclick="closeModal()">Cancel</button>
+        <button class="btn btn-primary" id="confirmBtn" onclick="executeDelegation()">Confirm</button>
+      </div>
+
+      <div class="modal-status" id="modalStatus"></div>
+    </div>
+  </div>
+
+  <!-- Config from server -->
+  <script>
+    const VALIDATOR_ADDR = "{{.OurValidatorAddr}}";
+    const REPORTER_ADDR = "{{.OurReporterAddr}}";
+    const CHAIN_ID = "{{.ChainID}}";
+    const EXPLORER_URL = "{{.ExplorerURL}}";
+    const DENOM = "loya";
+    const DECIMALS = 6;
+
+    const LAYER_CHAIN_INFO = {
+      chainId: CHAIN_ID,
+      chainName: "Tellor Layer",
+      rpc: "{{.LayerRPCURL}}",
+      rest: "{{.LayerAPIURL}}",
+      bip44: { coinType: 118 },
+      bech32Config: {
+        bech32PrefixAccAddr: "tellor",
+        bech32PrefixAccPub: "tellorpub",
+        bech32PrefixValAddr: "tellorvaloper",
+        bech32PrefixValPub: "tellorvaloperpub",
+        bech32PrefixConsAddr: "tellorvalcons",
+        bech32PrefixConsPub: "tellorvalconspub"
+      },
+      currencies: [{
+        coinDenom: "TRB",
+        coinMinimalDenom: DENOM,
+        coinDecimals: DECIMALS
+      }],
+      feeCurrencies: [{
+        coinDenom: "TRB",
+        coinMinimalDenom: DENOM,
+        coinDecimals: DECIMALS,
+        gasPriceStep: { low: 0.01, average: 0.025, high: 0.04 }
+      }],
+      stakeCurrency: {
+        coinDenom: "TRB",
+        coinMinimalDenom: DENOM,
+        coinDecimals: DECIMALS
+      },
+      features: ["stargate", "no-legacy-stdTx"]
+    };
+
+    // Toggle mobile menu
+    function toggleMenu() {
+      const hamburger = document.querySelector('.hamburger');
+      const navLinks = document.querySelector('.nav-links');
+      hamburger.classList.toggle('active');
+      navLinks.classList.toggle('active');
+    }
+
+    // Close menu when clicking a link
+    document.addEventListener('DOMContentLoaded', () => {
+      document.querySelectorAll('.nav-links .nav-link').forEach(link => {
+        link.addEventListener('click', () => {
+          document.querySelector('.hamburger').classList.remove('active');
+          document.querySelector('.nav-links').classList.remove('active');
+        });
+      });
+    });
+
+    function copyToClipboard(text) {
+      navigator.clipboard.writeText(text).then(() => {
+        // Simple feedback
+        const toast = document.createElement('div');
+        toast.textContent = 'Address copied!';
+        toast.style.cssText = 'position: fixed; bottom: 20px; right: 20px; background: var(--red); color: white; padding: 12px 20px; border-radius: 10px; font-size: 14px; font-weight: 600; z-index: 10000; box-shadow: 0 4px 20px rgba(0,0,0,0.3);';
+        document.body.appendChild(toast);
+        setTimeout(() => toast.remove(), 2000);
+      });
+    }
+  </script>
+  <script src="/assets/script.js"></script>
+</body>
+
+</html>
