@@ -23,8 +23,8 @@ import (
 
 	blockdb "github.com/cryptoriums/layer-monitor/db"
 	monitor "github.com/cryptoriums/layer-monitor/metrics"
-	cryptoaddr "github.com/cryptoriums/layer-packages/addr"
-	"github.com/cryptoriums/layer-packages/encoding"
+	cryptoaddr "github.com/cryptoriums/layer-monitor/addr"
+	"github.com/cryptoriums/layer-monitor/encoding"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	minttypes "github.com/tellor-io/layer/x/mint/types"

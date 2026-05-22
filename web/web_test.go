@@ -4,7 +4,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
-	"github.com/cryptoriums/layer-packages/addr"
+	"github.com/cryptoriums/layer-monitor/addr"
 )
 
 func TestToValcons(t *testing.T) {

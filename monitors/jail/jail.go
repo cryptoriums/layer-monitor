@@ -10,8 +10,8 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
 	monitor "github.com/cryptoriums/layer-monitor/metrics"
-	"github.com/cryptoriums/layer-packages/addr"
-	"github.com/cryptoriums/layer-packages/encoding"
+	"github.com/cryptoriums/layer-monitor/addr"
+	"github.com/cryptoriums/layer-monitor/encoding"
 	reportertypes "github.com/tellor-io/layer/x/reporter/types"
 
 	"cosmossdk.io/log"

@@ -19,7 +19,7 @@ import (
 	"github.com/cryptoriums/layer-monitor/monitors/domain"
 	"github.com/cryptoriums/layer-monitor/monitors/jail"
 	"github.com/cryptoriums/layer-monitor/web"
-	"github.com/cryptoriums/layer-packages/addr"
+	"github.com/cryptoriums/layer-monitor/addr"
 	"github.com/joho/godotenv"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/spf13/cobra"

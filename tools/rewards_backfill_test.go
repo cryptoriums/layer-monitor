@@ -27,7 +27,7 @@ import (
 	"github.com/joho/godotenv"
 	"github.com/shopspring/decimal"
 	blockdb "github.com/cryptoriums/layer-monitor/db"
-	"github.com/cryptoriums/layer-packages/encoding"
+	"github.com/cryptoriums/layer-monitor/encoding"
 	"github.com/cryptoriums/layer-monitor/monitors/block/processor"
 	_ "github.com/tellor-io/layer/app/config" // Import to trigger init() for bech32 prefix setup
 

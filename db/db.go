@@ -458,20 +458,3 @@ func GetOpenDisputes(ctx context.Context, database Db) ([]uint64, error) {
 	}
 	return disputes, nil
 }
-
-// ResolveDispute marks a dispute as resolved.
-func ResolveDispute(ctx context.Context, database Db, disputeID uint64) error {
-	if disputeID == 0 {
-		return errors.New("dispute ID is required")
-	}
-
-	query := fmt.Sprintf(`
-		INSERT INTO %s (%s, %s, %s)
-		VALUES (?, now(), ?)
-	`, TableNameDisputes, ColDisputeID, ColTimestamp, ColStatus)
-
-	if _, err := database.Exec(ctx, query, disputeID, DisputeStatusResolved); err != nil {
-		return fmt.Errorf("resolve dispute %d: %w", disputeID, err)
-	}
-	return nil
-}

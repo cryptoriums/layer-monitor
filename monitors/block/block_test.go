@@ -11,7 +11,7 @@ import (
 	_ "github.com/chdb-io/chdb-go/chdb/driver"
 	"github.com/stretchr/testify/require"
 	blockdb "github.com/cryptoriums/layer-monitor/db"
-	cryptolog "github.com/cryptoriums/layer-packages/log"
+	cryptolog "github.com/cryptoriums/layer-monitor/log"
 )
 
 // For all tests use only public module functions.

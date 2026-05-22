@@ -11,8 +11,8 @@ import (
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"github.com/cryptoriums/layer-packages/encoding"
-	cryptolog "github.com/cryptoriums/layer-packages/log"
+	"github.com/cryptoriums/layer-monitor/encoding"
+	cryptolog "github.com/cryptoriums/layer-monitor/log"
 	reportertypes "github.com/tellor-io/layer/x/reporter/types"
 
 	"github.com/cosmos/cosmos-sdk/x/staking/types"

@@ -9,7 +9,6 @@ require (
 	github.com/chdb-io/chdb-go v1.11.0
 	github.com/cometbft/cometbft v0.38.17
 	github.com/cosmos/cosmos-sdk v0.53.4
-	github.com/cryptoriums/layer-packages v0.0.0-20260519091334-521e441ea87a
 	github.com/cryptoriums/packages v0.0.0-20250518000009-95b8f4465745
 	github.com/joho/godotenv v1.5.1
 	github.com/prometheus/client_golang v1.22.0

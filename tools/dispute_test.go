@@ -14,7 +14,7 @@ import (
 	"time"
 
 	rpchttp "github.com/cometbft/cometbft/rpc/client/http"
-	"github.com/cryptoriums/layer-packages/encoding"
+	"github.com/cryptoriums/layer-monitor/encoding"
 	"github.com/joho/godotenv"
 	disputetypes "github.com/tellor-io/layer/x/dispute/types"
 

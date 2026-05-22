@@ -11,7 +11,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	blockdb "github.com/cryptoriums/layer-monitor/db"
-	cryptolog "github.com/cryptoriums/layer-packages/log"
+	cryptolog "github.com/cryptoriums/layer-monitor/log"
 )
 
 // setupWebTestDB creates an in-memory chdb database for testing.

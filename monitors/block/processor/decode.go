@@ -9,7 +9,7 @@ import (
 	"time"
 
 	abci "github.com/cometbft/cometbft/abci/types"
-	"github.com/cryptoriums/layer-packages/encoding"
+	"github.com/cryptoriums/layer-monitor/encoding"
 	"github.com/tellor-io/layer/app"
 	"github.com/tellor-io/layer/x/oracle/types"
 

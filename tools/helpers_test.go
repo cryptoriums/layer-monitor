@@ -2,12 +2,15 @@ package tools
 
 import (
 	"context"
+	"flag"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
 	"strings"
 )
+
+var envFile = flag.String("env-file", "", "Path to .env file to load before running tests")
 
 func parseAPIURLs() []string {
 	urlsStr := os.Getenv("LAYER_API_URLS")
