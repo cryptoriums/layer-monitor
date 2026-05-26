@@ -17,14 +17,15 @@ import (
 	"path"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
-	blockdb "github.com/cryptoriums/layer-monitor/db"
-	monitor "github.com/cryptoriums/layer-monitor/metrics"
 	cryptoaddr "github.com/cryptoriums/layer-monitor/addr"
+	blockdb "github.com/cryptoriums/layer-monitor/db"
 	"github.com/cryptoriums/layer-monitor/encoding"
+	monitor "github.com/cryptoriums/layer-monitor/metrics"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	minttypes "github.com/tellor-io/layer/x/mint/types"
@@ -407,8 +408,16 @@ func (s *Server) handleRoot(w http.ResponseWriter, r *http.Request) {
 		ourReporterPower = fmt.Sprintf("%d", reporter.Power)
 	}
 
+	// Parse optional period query param (1, 7, or 30 days); default to config value
+	periodDays := s.cfg.StatsPeriodDays
+	if p := r.URL.Query().Get("period"); p != "" {
+		if n, err := strconv.Atoi(p); err == nil && (n == 1 || n == 7 || n == 30) {
+			periodDays = n
+		}
+	}
+
 	// Get network reward statistics for the stats display period
-	rewardStats := s.queryNetworkRewardStats(ctx)
+	rewardStats := s.queryNetworkRewardStats(ctx, periodDays)
 
 	// Derive addresses and moniker from wallet
 	ourReporterAddr := s.cfg.WalletAddress
@@ -443,7 +452,8 @@ func (s *Server) handleRoot(w http.ResponseWriter, r *http.Request) {
 		"ValidatorTree":     validatorTree,
 		"TreeCacheTime":     cacheTimeStr,
 		"TreeLoading":       isLoading,
-		"Period":            fmt.Sprintf("%d Days", s.cfg.StatsPeriodDays),
+		"Period":            fmt.Sprintf("%d Days", periodDays),
+		"PeriodDays":        periodDays,
 		"TotalNetworkPower": totalNetworkPower,
 		"OurReporterPower":  ourReporterPower,
 		"TotalReporting":    rewardStats.TotalReporting,
@@ -498,12 +508,87 @@ func (s *Server) getValidatorTreeNonBlocking() ([]ValidatorTree, time.Time, bool
 func (s *Server) handleGetTree(w http.ResponseWriter, r *http.Request) {
 	tree, timestamp, isLoading := s.getValidatorTreeNonBlocking()
 
+	// Parse optional period param; default to LookbackPeriodDays
+	periodDays := s.cfg.LookbackPeriodDays
+	if p := r.URL.Query().Get("period"); p != "" {
+		if n, err := strconv.Atoi(p); err == nil && (n == 1 || n == 7 || n == 30) {
+			periodDays = n
+		}
+	}
+
+	// Convert to cached (serialisable) tree
+	validators := toCachedTree(tree)
+
+	// If a non-default period was requested, overlay fresh rewards + missed blocks
+	if periodDays != s.cfg.LookbackPeriodDays && len(validators) > 0 {
+		s.populateCachedRewardsForPeriod(r.Context(), validators, periodDays)
+		s.populateCachedMissedBlocksForPeriod(r.Context(), validators, periodDays)
+	}
+
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{
 		"loading":    isLoading,
 		"timestamp":  formatRelativeTime(timestamp),
-		"validators": toCachedTree(tree),
+		"validators": validators,
 	})
+}
+
+// populateCachedRewardsForPeriod re-queries rewards for a specific period and updates
+// the already-converted CachedValidatorTree slice in place.
+func (s *Server) populateCachedRewardsForPeriod(ctx context.Context, validators []CachedValidatorTree, periodDays int) {
+	if s.db == nil {
+		return
+	}
+	// Collect addresses
+	valAddrs := make([]string, 0, len(validators))
+	for i := range validators {
+		if validators[i].OperatorAddress != "" {
+			valAddrs = append(valAddrs, validators[i].OperatorAddress)
+		}
+	}
+	repAddrs := make([]string, 0)
+	for i := range validators {
+		for j := range validators[i].Reporters {
+			if validators[i].Reporters[j].Address != "" {
+				repAddrs = append(repAddrs, validators[i].Reporters[j].Address)
+			}
+		}
+	}
+	valRewards := s.getValidatorRewardsMap(ctx, valAddrs, periodDays)
+	repRewards := s.getReporterRewardsMap(ctx, repAddrs, periodDays)
+
+	for i := range validators {
+		if r, ok := valRewards[validators[i].OperatorAddress]; ok {
+			validators[i].Rewards = formatLoya(r)
+		} else {
+			validators[i].Rewards = valueZero
+		}
+		for j := range validators[i].Reporters {
+			if r, ok := repRewards[validators[i].Reporters[j].Address]; ok {
+				validators[i].Reporters[j].Rewards = formatLoya(r)
+			} else {
+				validators[i].Reporters[j].Rewards = valueZero
+			}
+		}
+	}
+}
+
+// populateCachedMissedBlocksForPeriod re-queries missed blocks for a specific period
+// and updates the CachedValidatorTree slice in place using the cached ValconsAddress.
+func (s *Server) populateCachedMissedBlocksForPeriod(ctx context.Context, validators []CachedValidatorTree, periodDays int) {
+	if s.db == nil {
+		return
+	}
+	missedMap, totalBlocks := s.getMissedBlocksPerValidatorFromDB(ctx, periodDays)
+	for i := range validators {
+		missed := int64(0)
+		if validators[i].ValconsAddress != "" {
+			missed = missedMap[validators[i].ValconsAddress]
+		}
+		validators[i].MissedBlocks = missed
+		validators[i].MissedBlocksPct = formatMissedPct(missed, totalBlocks)
+		validators[i].Status = computeStatus(validators[i].Jailed, missed)
+	}
 }
 
 // ReportStats holds network-wide report statistics.
@@ -580,7 +665,7 @@ type NetworkRewardStats struct {
 }
 
 // queryNetworkRewardStats aggregates reporting and validating rewards for the stats display period.
-func (s *Server) queryNetworkRewardStats(ctx context.Context) NetworkRewardStats {
+func (s *Server) queryNetworkRewardStats(ctx context.Context, periodDays int) NetworkRewardStats {
 	queryTotal := func(rewardType string) uint64 {
 		q := fmt.Sprintf(`
 			SELECT coalesce(sum(toFloat64(%s)), 0) AS total
@@ -589,7 +674,7 @@ func (s *Server) queryNetworkRewardStats(ctx context.Context) NetworkRewardStats
 			  AND %s >= now() - INTERVAL %d DAY
 		`, blockdb.ColAmount, blockdb.TableNameRewards,
 			blockdb.ColType,
-			blockdb.ColBlockTime, s.cfg.StatsPeriodDays)
+			blockdb.ColBlockTime, periodDays)
 
 		rows, err := s.db.Query(ctx, q, rewardType)
 		if err != nil {
@@ -617,7 +702,7 @@ func (s *Server) queryNetworkRewardStats(ctx context.Context) NetworkRewardStats
 		`, blockdb.ColAmount, blockdb.TableNameRewards,
 			blockdb.ColRecipient,
 			blockdb.ColType,
-			blockdb.ColBlockTime, s.cfg.StatsPeriodDays)
+			blockdb.ColBlockTime, periodDays)
 
 		rows, err := s.db.Query(ctx, q, addr, rewardType)
 		if err != nil {
@@ -708,7 +793,7 @@ func (s *Server) fetchMintRate() MintRate {
 
 // getValidatorRewardsMap fetches rewards for multiple validators in a single query.
 // Returns a map of validator operator address -> total rewards (loya).
-func (s *Server) getValidatorRewardsMap(ctx context.Context, validatorAddresses []string) map[string]uint64 {
+func (s *Server) getValidatorRewardsMap(ctx context.Context, validatorAddresses []string, periodDays int) map[string]uint64 {
 	if len(validatorAddresses) == 0 {
 		return make(map[string]uint64)
 	}
@@ -731,7 +816,7 @@ func (s *Server) getValidatorRewardsMap(ctx context.Context, validatorAddresses 
 	`, blockdb.ColRecipient, blockdb.ColAmount, blockdb.TableNameRewards,
 		blockdb.ColRecipient, strings.Join(placeholders, ","),
 		blockdb.ColType,
-		blockdb.ColBlockTime, s.cfg.LookbackPeriodDays,
+		blockdb.ColBlockTime, periodDays,
 		blockdb.ColRecipient)
 
 	// Build args slice with addresses + reward type
@@ -764,7 +849,7 @@ func (s *Server) getValidatorRewardsMap(ctx context.Context, validatorAddresses 
 
 // getReporterRewardsMap fetches rewards for multiple reporters in a single query.
 // Returns a map of reporter address -> total rewards (loya).
-func (s *Server) getReporterRewardsMap(ctx context.Context, reporterAddresses []string) map[string]uint64 {
+func (s *Server) getReporterRewardsMap(ctx context.Context, reporterAddresses []string, periodDays int) map[string]uint64 {
 	if len(reporterAddresses) == 0 {
 		return make(map[string]uint64)
 	}
@@ -787,7 +872,7 @@ func (s *Server) getReporterRewardsMap(ctx context.Context, reporterAddresses []
 	`, blockdb.ColRecipient, blockdb.ColAmount, blockdb.TableNameRewards,
 		blockdb.ColRecipient, strings.Join(placeholders, ","),
 		blockdb.ColType,
-		blockdb.ColBlockTime, s.cfg.LookbackPeriodDays,
+		blockdb.ColBlockTime, periodDays,
 		blockdb.ColRecipient)
 
 	// Build args slice with addresses + reward type
@@ -944,6 +1029,7 @@ type SelectorTree struct {
 // It only contains the display fields needed for rendering, not the full SDK types.
 type CachedValidatorTree struct {
 	OperatorAddress string               `json:"operator_address"`
+	ValconsAddress  string               `json:"valcons_address"`
 	Moniker         string               `json:"moniker"`
 	ShortAddress    string               `json:"short_address"`
 	PowerTRB        string               `json:"power_trb"`
@@ -1162,7 +1248,7 @@ func (s *Server) buildValidatorTree(ctx context.Context) []ValidatorTree {
 
 	// Get missed cycles per reporter and missed blocks per validator from DB (lookback period)
 	missedCyclesMap, totalCycles := s.getMissedCyclesPerReporterFromDB(ctx)
-	missedBlocksMap, totalBlocks := s.getMissedBlocksPerValidatorFromDB(ctx)
+	missedBlocksMap, totalBlocks := s.getMissedBlocksPerValidatorFromDB(ctx, s.cfg.LookbackPeriodDays)
 
 	// Calculate total stake per reporter, detect self-selectors, set HasReporters flag, and populate metrics
 	for i := range validators {
@@ -1297,6 +1383,11 @@ func (s *Server) buildValidatorTree(ctx context.Context) []ValidatorTree {
 
 // populateRewardsData fetches and populates rewards for all validators and reporters in the tree.
 func (s *Server) populateRewardsData(ctx context.Context, validators []ValidatorTree) {
+	s.populateRewardsDataForPeriod(ctx, validators, s.cfg.LookbackPeriodDays)
+}
+
+// populateRewardsDataForPeriod fetches and populates rewards using a specific period.
+func (s *Server) populateRewardsDataForPeriod(ctx context.Context, validators []ValidatorTree, periodDays int) {
 	if s.db == nil {
 		return
 	}
@@ -1304,8 +1395,8 @@ func (s *Server) populateRewardsData(ctx context.Context, validators []Validator
 	validatorAddrs := s.collectValidatorAddresses(validators)
 	reporterAddrs := s.collectReporterAddresses(validators)
 
-	validatorRewards := s.getValidatorRewardsMap(ctx, validatorAddrs)
-	reporterRewards := s.getReporterRewardsMap(ctx, reporterAddrs)
+	validatorRewards := s.getValidatorRewardsMap(ctx, validatorAddrs, periodDays)
+	reporterRewards := s.getReporterRewardsMap(ctx, reporterAddrs, periodDays)
 
 	s.setValidatorRewards(validators, validatorRewards)
 	s.setReporterRewards(validators, reporterRewards)
@@ -1769,7 +1860,7 @@ func (s *Server) getMissedCyclesPerReporterFromDB(ctx context.Context) (map[stri
 // This correctly counts all absences (validator not present in any commit) as missed.
 // Also returns the total distinct blocks seen in the lookback period (used to
 // compute miss percentage on the status page).
-func (s *Server) getMissedBlocksPerValidatorFromDB(ctx context.Context) (map[string]int64, int64) {
+func (s *Server) getMissedBlocksPerValidatorFromDB(ctx context.Context, periodDays int) (map[string]int64, int64) {
 	result := make(map[string]int64)
 
 	// Total distinct blocks in lookback period - used as denominator for miss%.
@@ -1777,7 +1868,7 @@ func (s *Server) getMissedBlocksPerValidatorFromDB(ctx context.Context) (map[str
 		SELECT COUNT(DISTINCT %s)
 		FROM %s
 		WHERE %s >= now() - INTERVAL %d DAY
-	`, blockdb.ColBlockHeight, blockdb.TableNameBlockSigns, blockdb.ColBlockTimestamp, s.cfg.LookbackPeriodDays)
+	`, blockdb.ColBlockHeight, blockdb.TableNameBlockSigns, blockdb.ColBlockTimestamp, periodDays)
 	var totalBlocks int64
 	if trows, err := s.db.Query(ctx, totalQuery); err == nil {
 		if trows.Next() {
@@ -1803,9 +1894,9 @@ func (s *Server) getMissedBlocksPerValidatorFromDB(ctx context.Context) (map[str
 	`,
 		blockdb.ColValidatorAddress,
 		blockdb.ColBlockHeight,
-		blockdb.TableNameBlockSigns, blockdb.ColBlockTimestamp, s.cfg.LookbackPeriodDays,
+		blockdb.TableNameBlockSigns, blockdb.ColBlockTimestamp, periodDays,
 		blockdb.TableNameBlockSigns,
-		blockdb.ColBlockTimestamp, s.cfg.LookbackPeriodDays,
+		blockdb.ColBlockTimestamp, periodDays,
 		blockdb.ColValidatorAddress,
 	)
 
@@ -1848,6 +1939,14 @@ func toCachedTree(tree []ValidatorTree) []CachedValidatorTree {
 		}
 		if v.Validator != nil {
 			cached[i].OperatorAddress = v.Validator.OperatorAddress
+			if v.Validator.ConsensusPubkey != nil {
+				pubkeyBase64 := extractPubkeyFromAny(v.Validator.ConsensusPubkey)
+				if pubkeyBase64 != "" {
+					if valconsAddr, err := cryptoaddr.ToValcons(pubkeyBase64); err == nil {
+						cached[i].ValconsAddress = valconsAddr
+					}
+				}
+			}
 		}
 		for j, r := range v.Reporters {
 			cached[i].Reporters[j] = CachedReporterTree{

@@ -392,35 +392,44 @@
   <section id="network" class="section">
     <div class="container">
       <div class="text-center mb-4" style="margin-bottom: 32px;">
-        <h2 style="font-size: 32px; font-weight: 800; color: var(--text); margin-bottom: 12px;">Network
-          Statistics ({{.Period}})</h2>
+        <h2 style="font-size: 32px; font-weight: 800; color: var(--text); margin-bottom: 16px;">Network Statistics</h2>
+        <div class="period-selector">
+          <a href="?period=1#network" class="period-btn{{if eq .PeriodDays 1}} period-btn-active{{end}}">1 Day</a>
+          <a href="?period=7#network" class="period-btn{{if eq .PeriodDays 7}} period-btn-active{{end}}">7 Days</a>
+          <a href="?period=30#network" class="period-btn{{if eq .PeriodDays 30}} period-btn-active{{end}}">30 Days</a>
+        </div>
       </div>
 
       <div class="stats-grid">
         <div class="stat-card">
-          <div class="stat-label">Rewards Reporting</div>
-          <div class="stat-split">
-            <div class="stat-block">
-              <div class="stat-sub">Total</div>
-              <div class="stat-value" style="color: rgb(27, 238, 27);">{{.TotalReporting}}</div>
+          <div class="stat-label">Rewards</div>
+          <div class="rewards-grid">
+            <div class="rewards-group">
+              <div class="rewards-group-label">Reporting</div>
+              <div class="rewards-group-cols">
+                <div class="stat-block">
+                  <div class="stat-sub">Total</div>
+                  <div class="stat-value" style="color: rgb(27, 238, 27);">{{.TotalReporting}}</div>
+                </div>
+                <div class="stat-block">
+                  <div class="stat-sub">Our</div>
+                  <div class="stat-value">{{.OurReporting}}</div>
+                </div>
+              </div>
             </div>
-            <div class="stat-block">
-              <div class="stat-sub">Our</div>
-              <div class="stat-value">{{.OurReporting}}</div>
-            </div>
-          </div>
-        </div>
-
-        <div class="stat-card">
-          <div class="stat-label">Rewards Validating</div>
-          <div class="stat-split">
-            <div class="stat-block">
-              <div class="stat-sub">Total</div>
-              <div class="stat-value" style="color: rgb(27, 238, 27);">{{.TotalValidating }}</div>
-            </div>
-            <div class="stat-block">
-              <div class="stat-sub">Our</div>
-              <div class="stat-value">{{.OurValidating}}</div>
+            <div class="rewards-divider"></div>
+            <div class="rewards-group">
+              <div class="rewards-group-label">Validating</div>
+              <div class="rewards-group-cols">
+                <div class="stat-block">
+                  <div class="stat-sub">Total</div>
+                  <div class="stat-value" style="color: rgb(27, 238, 27);">{{.TotalValidating}}</div>
+                </div>
+                <div class="stat-block">
+                  <div class="stat-sub">Our</div>
+                  <div class="stat-value">{{.OurValidating}}</div>
+                </div>
+              </div>
             </div>
           </div>
         </div>
@@ -469,20 +478,47 @@
   <!-- CTA Section -->
   {{if .OurValidatorAddr}}
   <section class="section cta-section">
-    <div class="container text-center">
-      <h2 class="cta-title">Have a question? msg me on Discord</h2>
-      <p class="cta-subtitle">Let's grow the Tellor rewards together.</p>
-      <button class="btn btn-primary btn-lg" onclick="openDelegateModal()">
-        Single click delegation
-      </button>
-      <div class="cta-link">
-        <a href="#infrastructure" class="view-link">
-          View infrastructure details
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none">
-            <path d="M5 12h14M12 5l7 7-7 7" stroke="currentColor" stroke-width="2" stroke-linecap="round"
-              stroke-linejoin="round" />
-          </svg>
-        </a>
+    <div class="container">
+      <div class="cta-grid">
+
+        <!-- Delegate CTA -->
+        <div class="cta-card cta-card-primary">
+          <div class="cta-card-icon">
+            <svg width="28" height="28" viewBox="0 0 24 24" fill="none">
+              <path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+            </svg>
+          </div>
+          <h3 class="cta-card-title">Start Delegating</h3>
+          <p class="cta-card-desc">Delegate TRB to our validator and select our reporter in a single transaction.</p>
+          <button class="btn btn-primary btn-lg" onclick="openDelegateModal()">Single click delegation</button>
+          <div class="cta-link">
+            <a href="#infrastructure" class="view-link">
+              View infrastructure details
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none">
+                <path d="M5 12h14M12 5l7 7-7 7" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" />
+              </svg>
+            </a>
+          </div>
+        </div>
+
+        <!-- Discord CTA -->
+        <div class="cta-card cta-card-discord">
+          <div class="cta-card-icon cta-discord-icon">
+            <svg width="28" height="28" viewBox="0 0 24 24" fill="currentColor">
+              <path d="M20.317 4.492c-1.53-.69-3.17-1.2-4.885-1.49a.075.075 0 0 0-.079.036c-.21.369-.444.85-.608 1.23a18.566 18.566 0 0 0-5.487 0 12.36 12.36 0 0 0-.617-1.23A.077.077 0 0 0 8.562 3c-1.714.29-3.354.8-4.885 1.491a.07.07 0 0 0-.032.027C.533 9.093-.32 13.555.099 17.961a.08.08 0 0 0 .031.055 20.03 20.03 0 0 0 5.993 2.98.078.078 0 0 0 .084-.026c.462-.62.874-1.275 1.226-1.963a.074.074 0 0 0-.041-.104 13.201 13.201 0 0 1-1.872-.878.075.075 0 0 1-.008-.125c.126-.093.252-.19.372-.287a.075.075 0 0 1 .078-.01c3.927 1.764 8.18 1.764 12.061 0a.075.075 0 0 1 .079.009c.12.098.245.195.372.288a.075.075 0 0 1-.006.125c-.598.344-1.22.635-1.873.877a.075.075 0 0 0-.041.105c.36.687.772 1.341 1.225 1.962a.077.077 0 0 0 .084.028 19.963 19.963 0 0 0 6.002-2.981.076.076 0 0 0 .032-.054c.5-5.094-.838-9.52-3.549-13.442a.06.06 0 0 0-.031-.028zM8.02 15.278c-1.182 0-2.157-1.069-2.157-2.38 0-1.312.956-2.38 2.157-2.38 1.21 0 2.176 1.077 2.157 2.38 0 1.311-.956 2.38-2.157 2.38zm7.975 0c-1.183 0-2.157-1.069-2.157-2.38 0-1.312.955-2.38 2.157-2.38 1.21 0 2.176 1.077 2.157 2.38 0 1.311-.946 2.38-2.157 2.38z"/>
+            </svg>
+          </div>
+          <h3 class="cta-card-title">Have a question?</h3>
+          <p class="cta-card-desc">msg me on Discord</p>
+          <div class="cta-discord-info">
+            <a href="https://discord.gg/tellor" target="_blank" rel="noopener" class="cta-discord-link">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M20.317 4.492c-1.53-.69-3.17-1.2-4.885-1.49a.075.075 0 0 0-.079.036c-.21.369-.444.85-.608 1.23a18.566 18.566 0 0 0-5.487 0 12.36 12.36 0 0 0-.617-1.23A.077.077 0 0 0 8.562 3c-1.714.29-3.354.8-4.885 1.491a.07.07 0 0 0-.032.027C.533 9.093-.32 13.555.099 17.961a.08.08 0 0 0 .031.055 20.03 20.03 0 0 0 5.993 2.98.078.078 0 0 0 .084-.026c.462-.62.874-1.275 1.226-1.963a.074.074 0 0 0-.041-.104 13.201 13.201 0 0 1-1.872-.878.075.075 0 0 1-.008-.125c.126-.093.252-.19.372-.287a.075.075 0 0 1 .078-.01c3.927 1.764 8.18 1.764 12.061 0a.075.075 0 0 1 .079.009c.12.098.245.195.372.288a.075.075 0 0 1-.006.125c-.598.344-1.22.635-1.873.877a.075.075 0 0 0-.041.105c.36.687.772 1.341 1.225 1.962a.077.077 0 0 0 .084.028 19.963 19.963 0 0 0 6.002-2.981.076.076 0 0 0 .032-.054c.5-5.094-.838-9.52-3.549-13.442a.06.06 0 0 0-.031-.028zM8.02 15.278c-1.182 0-2.157-1.069-2.157-2.38 0-1.312.956-2.38 2.157-2.38 1.21 0 2.176 1.077 2.157 2.38 0 1.311-.956 2.38-2.157 2.38zm7.975 0c-1.183 0-2.157-1.069-2.157-2.38 0-1.312.955-2.38 2.157-2.38 1.21 0 2.176 1.077 2.157 2.38 0 1.311-.946 2.38-2.157 2.38z"/></svg>
+              discord.gg/tellor
+            </a>
+            <span class="cta-discord-handle">@krasi</span>
+          </div>
+        </div>
+
       </div>
     </div>
   </section>

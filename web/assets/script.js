@@ -40,7 +40,9 @@ const Long = {
 
   async function pollTree() {
     try {
-      const response = await fetch('/api/tree');
+      const period = new URLSearchParams(window.location.search).get('period') || '';
+      const url = period ? `/api/tree?period=${period}` : '/api/tree';
+      const response = await fetch(url);
       if (!response.ok) throw new Error('Failed to fetch tree');
 
       const data = await response.json();
@@ -448,23 +450,26 @@ async function executeDelegation() {
     const accountURL = `${LAYER_CHAIN_INFO.rest}/cosmos/auth/v1beta1/accounts/${sender}`;
     console.log("[6] Fetching account from:", accountURL);
     const accountResp = await fetch(accountURL);
-    if (!accountResp.ok) {
+    let accountNumber = "0", sequence = "0";
+    if (accountResp.status === 404) {
+      // Account has never transacted on-chain yet — use defaults (valid for first tx)
+      console.log("[6] Account not found on-chain (new account), using account_number=0, sequence=0");
+    } else if (!accountResp.ok) {
       console.error("[6] Account fetch failed:", accountResp.status, accountResp.statusText);
       throw new Error('Failed to fetch account info');
-    }
-    const accountData = await accountResp.json();
-    console.log("[6] Raw account response:", JSON.stringify(accountData, null, 2));
-
-    let accountNumber, sequence;
-    const acc = accountData.account;
-    if (acc.base_account) {
-      console.log("[7] Using base_account format");
-      accountNumber = acc.base_account.account_number || "0";
-      sequence = acc.base_account.sequence || "0";
     } else {
-      console.log("[7] Using direct account format");
-      accountNumber = acc.account_number || "0";
-      sequence = acc.sequence || "0";
+      const accountData = await accountResp.json();
+      console.log("[6] Raw account response:", JSON.stringify(accountData, null, 2));
+      const acc = accountData.account;
+      if (acc && acc.base_account) {
+        console.log("[7] Using base_account format");
+        accountNumber = acc.base_account.account_number || "0";
+        sequence = acc.base_account.sequence || "0";
+      } else if (acc) {
+        console.log("[7] Using direct account format");
+        accountNumber = acc.account_number || "0";
+        sequence = acc.sequence || "0";
+      }
     }
 
     console.log("[7] Parsed account_number:", accountNumber);
