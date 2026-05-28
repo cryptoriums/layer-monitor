@@ -51,8 +51,8 @@ type Config struct {
 	Timeout            time.Duration `yaml:"timeout"`
 	LayerAPIURLs       []string      `yaml:"layer_api_urls"`       // Multiple URLs for redundancy
 	RPCNodes           []string      `yaml:"rpc_nodes"`            // RPC nodes (tcp:// format)
-	PublicRPCURL       string        `yaml:"public_rpc_url"`       // Public RPC URL for browser/Keplr
-	PublicAPIURL       string        `yaml:"public_api_url"`       // Public API URL for browser/Keplr
+	PublicRPCURL       string        `yaml:"public_rpc_url"`       // Public RPC URL for browser clients
+	PublicAPIURL       string        `yaml:"public_api_url"`       // Public API URL for browser clients
 	ExplorerURL        string        `yaml:"explorer_url"`         // Block explorer URL (e.g., "https://tellorscan.com")
 	WalletAddress      string        `yaml:"wallet_address"`       // Wallet address (tellor1xxx)
 	LookbackPeriodDays int           `yaml:"lookback_period_days"` // Days to look back for statistics (default 7)
@@ -519,9 +519,10 @@ func (s *Server) handleGetTree(w http.ResponseWriter, r *http.Request) {
 	// Convert to cached (serialisable) tree
 	validators := toCachedTree(tree)
 
-	// If a non-default period was requested, overlay fresh rewards + missed blocks
+	// If a non-default period was requested, overlay fresh rewards + missed metrics
 	if periodDays != s.cfg.LookbackPeriodDays && len(validators) > 0 {
 		s.populateCachedRewardsForPeriod(r.Context(), validators, periodDays)
+		s.populateCachedMissedCyclesForPeriod(r.Context(), validators, periodDays)
 		s.populateCachedMissedBlocksForPeriod(r.Context(), validators, periodDays)
 	}
 
@@ -588,6 +589,34 @@ func (s *Server) populateCachedMissedBlocksForPeriod(ctx context.Context, valida
 		validators[i].MissedBlocks = missed
 		validators[i].MissedBlocksPct = formatMissedPct(missed, totalBlocks)
 		validators[i].Status = computeStatus(validators[i].Jailed, missed)
+	}
+}
+
+// populateCachedMissedCyclesForPeriod re-queries missed cycles for a specific period
+// and updates reporter nodes in the CachedValidatorTree slice in place.
+func (s *Server) populateCachedMissedCyclesForPeriod(ctx context.Context, validators []CachedValidatorTree, periodDays int) {
+	if s.db == nil {
+		return
+	}
+	missedMap, totalCycles := s.getMissedCyclesPerReporterFromDBForPeriod(ctx, periodDays)
+	for i := range validators {
+		for j := range validators[i].Reporters {
+			reporterAddr := validators[i].Reporters[j].Address
+			if reporterAddr == "" {
+				validators[i].Reporters[j].MissedCycles = 0
+				validators[i].Reporters[j].MissedCyclesPct = "-"
+				continue
+			}
+
+			if missedCycles, ok := missedMap[reporterAddr]; ok {
+				validators[i].Reporters[j].MissedCycles = missedCycles
+			} else {
+				// Reporter submitted no cyclelist reports in this period.
+				validators[i].Reporters[j].MissedCycles = totalCycles
+			}
+			validators[i].Reporters[j].MissedCyclesPct = formatMissedPct(validators[i].Reporters[j].MissedCycles, totalCycles)
+			validators[i].Reporters[j].Status = computeStatus(validators[i].Reporters[j].Jailed, validators[i].Reporters[j].MissedCycles)
+		}
 	}
 }
 
@@ -1782,14 +1811,25 @@ func (s *Server) handleRefreshTree(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// getMissedCyclesPerReporterFromDB queries missed reports from DB for all reporters (lookback period).
+func (s *Server) getMissedCyclesPerReporterFromDB(ctx context.Context) (map[string]int64, int64) {
+	return s.getMissedCyclesPerReporterFromDBForPeriod(ctx, s.cfg.LookbackPeriodDays)
+}
+
+// getMissedCyclesPerReporterFromDBForPeriod queries missed reports from DB for all
+// reporters in the provided period window.
 // Returns a map of reporter address -> missed cycles count.
 //
 // Simple calculation: Missed = Total Cycles - Report Count
 // This shows how many cycles the reporter didn't submit a report.
-func (s *Server) getMissedCyclesPerReporterFromDB(ctx context.Context) (map[string]int64, int64) {
+func (s *Server) getMissedCyclesPerReporterFromDBForPeriod(ctx context.Context, periodDays int) (map[string]int64, int64) {
 	result := make(map[string]int64)
-	minutes := s.cfg.LookbackPeriodDays * 24 * 60
+	if periodDays <= 0 {
+		periodDays = s.cfg.LookbackPeriodDays
+	}
+	if periodDays <= 0 {
+		periodDays = DefaultLookbackPeriodDays
+	}
+	minutes := periodDays * 24 * 60
 
 	// Get total cycle rotations in lookback period
 	cyclesQuery := fmt.Sprintf(`

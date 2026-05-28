@@ -4,22 +4,30 @@ go 1.24.1
 
 require (
 	cosmossdk.io/log v1.6.0
+	cosmossdk.io/x/evidence v0.1.0
+	cosmossdk.io/x/feegrant v0.1.0
+	cosmossdk.io/x/upgrade v0.1.1
 	github.com/ClickHouse/clickhouse-go/v2 v2.43.0
 	github.com/adshao/go-binance/v2 v2.8.7
 	github.com/chdb-io/chdb-go v1.11.0
 	github.com/cometbft/cometbft v0.38.17
 	github.com/cosmos/cosmos-sdk v0.53.4
+	github.com/cosmos/ibc-apps/modules/async-icq/v8 v8.0.0
+	github.com/cosmos/ibc-go/v8 v8.0.0
 	github.com/cryptoriums/packages v0.0.0-20250518000009-95b8f4465745
 	github.com/joho/godotenv v1.5.1
 	github.com/prometheus/client_golang v1.22.0
+	github.com/rs/zerolog v1.34.0
 	github.com/shopspring/decimal v1.4.0
 	github.com/spf13/cobra v1.9.1
+	github.com/strangelove-ventures/globalfee v0.50.1
 	github.com/stretchr/testify v1.11.1
 	github.com/tellor-io/layer v0.0.0-20260102193944-693854ff6bff
 	golang.org/x/sync v0.19.0
 )
 
 require (
+	github.com/tellor-io/layer-daemons v0.2.0
 	cosmossdk.io/errors v1.0.2 // indirect
 	cosmossdk.io/math v1.5.3 // indirect
 	github.com/cosmos/gogoproto v1.7.0 // indirect
@@ -46,10 +54,7 @@ require (
 	cosmossdk.io/core v0.12.0 // indirect
 	cosmossdk.io/depinject v1.2.1 // indirect
 	cosmossdk.io/store v1.1.2 // indirect
-	cosmossdk.io/x/evidence v0.1.0 // indirect
-	cosmossdk.io/x/feegrant v0.1.0 // indirect
 	cosmossdk.io/x/tx v0.14.0 // indirect
-	cosmossdk.io/x/upgrade v0.1.1 // indirect
 	github.com/ClickHouse/ch-go v0.71.0 // indirect
 	github.com/GoogleCloudPlatform/opentelemetry-operations-go/detectors/gcp v1.26.0 // indirect
 	github.com/GoogleCloudPlatform/opentelemetry-operations-go/exporter/metric v0.48.1 // indirect
@@ -65,8 +70,6 @@ require (
 	github.com/cometbft/cometbft-db v0.15.0 // indirect
 	github.com/cosmos/cosmos-db v1.1.3 // indirect
 	github.com/cosmos/cosmos-proto v1.0.0-beta.5 // indirect
-	github.com/cosmos/ibc-apps/modules/async-icq/v8 v8.0.0 // indirect
-	github.com/cosmos/ibc-go/v8 v8.0.0 // indirect
 	github.com/ebitengine/purego v0.8.4 // indirect
 	github.com/envoyproxy/go-control-plane/envoy v1.32.4 // indirect
 	github.com/envoyproxy/protoc-gen-validate v1.2.1 // indirect
@@ -89,12 +92,10 @@ require (
 	github.com/pierrec/lz4/v4 v4.1.25 // indirect
 	github.com/planetscale/vtprotobuf v0.6.1-0.20240319094008-0393e58bdf10 // indirect
 	github.com/rivo/uniseg v0.4.7 // indirect
-	github.com/rs/zerolog v1.34.0 // indirect
 	github.com/segmentio/asm v1.2.1 // indirect
 	github.com/segmentio/encoding v0.4.0 // indirect
 	github.com/spf13/pflag v1.0.7 // indirect
 	github.com/spiffe/go-spiffe/v2 v2.5.0 // indirect
-	github.com/strangelove-ventures/globalfee v0.50.1 // indirect
 	github.com/twitchyliquid64/golang-asm v0.15.1 // indirect
 	github.com/zeebo/errs v1.4.0 // indirect
 	go.opentelemetry.io/contrib/detectors/gcp v1.34.0 // indirect
