@@ -8,10 +8,10 @@ import (
 	"time"
 
 	_ "github.com/chdb-io/chdb-go/chdb/driver"
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
 	blockdb "github.com/cryptoriums/layer-monitor/db"
 	cryptolog "github.com/cryptoriums/layer-monitor/log"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // setupWebTestDB creates an in-memory chdb database for testing.
@@ -395,4 +395,79 @@ func TestGetMissedCyclesPerReporterFromDB_SameTimestampMultipleCycles(t *testing
 	// 3 cycles - 2 reports = 1 missed
 	require.Contains(t, result, reporter)
 	assert.Equal(t, int64(1), result[reporter], "should handle same timestamp correctly")
+}
+
+func TestGetMissedCyclesPerReporterFromDBForPeriod_OverridesLookback(t *testing.T) {
+	ctx := context.Background()
+	db := setupWebTestDB(t)
+	server := newTestServer(db, 30) // Default window is 30 days
+
+	now := time.Now().UTC()
+	reporter := "tellor1reporterPeriodOverride"
+
+	// Insert 5 cycles within the last day.
+	for i := 0; i < 5; i++ {
+		insertCycleRotation(t, db, int64(100+i), fmt.Sprintf("queryid_recent%d", i), now.Add(-time.Hour*time.Duration(i)))
+	}
+
+	// Insert 5 cycles older than 1 day (but still within 30 days).
+	for i := 0; i < 5; i++ {
+		insertCycleRotation(t, db, int64(200+i), fmt.Sprintf("queryid_old%d", i), now.Add(-48*time.Hour-time.Hour*time.Duration(i)))
+	}
+
+	// Reporter submits 3 cyclelist reports in the last day.
+	for i := 0; i < 3; i++ {
+		insertReport(t, db, reporter, fmt.Sprintf("queryid_recent%d", i), now.Add(-time.Hour*time.Duration(i)), 1, int64(100+i))
+	}
+
+	// Reporter also has old reports that should be ignored for period=1.
+	for i := 0; i < 5; i++ {
+		insertReport(t, db, reporter, fmt.Sprintf("queryid_old%d", i), now.Add(-48*time.Hour-time.Hour*time.Duration(i)), 1, int64(200+i))
+	}
+
+	result, _ := server.getMissedCyclesPerReporterFromDBForPeriod(ctx, 1)
+
+	// For period=1: 5 recent cycles - 3 recent reports = 2 missed.
+	require.Contains(t, result, reporter)
+	assert.Equal(t, int64(2), result[reporter], "period override should use requested day window")
+}
+
+func TestPopulateCachedMissedCyclesForPeriod_UpdatesReporterMetrics(t *testing.T) {
+	ctx := context.Background()
+	db := setupWebTestDB(t)
+	server := newTestServer(db, 30)
+
+	now := time.Now().UTC()
+	reporterA := "tellor1reporterOverlayA"
+	reporterB := "tellor1reporterOverlayB"
+
+	// Period=1 data: 5 cycles, reporterA submitted 4 cyclelist reports.
+	for i := 0; i < 5; i++ {
+		insertCycleRotation(t, db, int64(300+i), fmt.Sprintf("queryid_overlay%d", i), now.Add(-time.Hour*time.Duration(i)))
+	}
+	for i := 0; i < 4; i++ {
+		insertReport(t, db, reporterA, fmt.Sprintf("queryid_overlay%d", i), now.Add(-time.Hour*time.Duration(i)), 1, int64(300+i))
+	}
+
+	validators := []CachedValidatorTree{
+		{
+			Reporters: []CachedReporterTree{
+				{Address: reporterA, Status: "Degraded"},
+				{Address: reporterB, Status: "Active"},
+			},
+		},
+	}
+
+	server.populateCachedMissedCyclesForPeriod(ctx, validators, 1)
+
+	require.Len(t, validators, 1)
+	require.Len(t, validators[0].Reporters, 2)
+
+	assert.Equal(t, int64(1), validators[0].Reporters[0].MissedCycles)
+	assert.Equal(t, "20%", validators[0].Reporters[0].MissedCyclesPct)
+	assert.Equal(t, "Active", validators[0].Reporters[0].Status)
+
+	// reporterB has no cyclelist reports in this period, so it misses all cycles.
+	assert.Equal(t, int64(5), validators[0].Reporters[1].MissedCycles)
+	assert.Equal(t, "100%", validators[0].Reporters[1].MissedCyclesPct)
 }

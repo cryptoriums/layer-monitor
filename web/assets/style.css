@@ -572,6 +572,8 @@ body {
 
 .dashboard-svg {
   display: block;
+  width: 100%;
+  height: auto;
   transform: rotateY(-8deg) rotateX(4deg);
   transition: transform 0.4s ease;
 }

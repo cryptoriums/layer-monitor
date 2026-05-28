@@ -9,11 +9,11 @@ import (
 	"sync"
 	"time"
 
+	blockdb "github.com/cryptoriums/layer-monitor/db"
+	"github.com/cryptoriums/layer-monitor/encoding"
+	monitor "github.com/cryptoriums/layer-monitor/metrics"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
-	"github.com/tellor-io/layer-daemons/cryptoriums"
-	blockdb "github.com/tellor-io/layer-daemons/cryptoriums/db"
-	"github.com/cryptoriums/layer-monitor/encoding"
 	"github.com/tellor-io/layer/x/dispute/types"
 	"golang.org/x/sync/errgroup"
 
@@ -52,7 +52,7 @@ func New(logger log.Logger, cfg Config, reg prometheus.Registerer) *Monitor {
 
 	openDisputesGauge := promauto.With(reg).NewGauge(
 		prometheus.GaugeOpts{
-			Namespace: cryptoriums.MetricsNamespace,
+			Namespace: monitor.MetricsNamespace,
 			Subsystem: "dispute",
 			Name:      "open_disputes_count",
 			Help:      "Number of open disputes",
@@ -119,7 +119,7 @@ func (m *Monitor) checkDisputes(ctx context.Context) {
 		dbDisputes, err := blockdb.GetOpenDisputes(ctx, cfg.Db)
 		if err != nil {
 			m.logger.Error("failed to query disputes from DB", "error", err)
-			cryptoriums.IncError("db_query_failed", Component)
+			monitor.IncError("db_query_failed", Component)
 		} else {
 			for _, id := range dbDisputes {
 				allDisputes[id] = struct{}{}
@@ -193,7 +193,7 @@ func (m *Monitor) queryAllAPINodes(ctx context.Context, apiURLs []string) []uint
 	// If ALL nodes failed, this is a critical error
 	if errorCount == len(apiURLs) && errorCount > 0 {
 		m.logger.Error("all API nodes failed to respond")
-		cryptoriums.IncError("all_nodes_failed", Component)
+		monitor.IncError("all_nodes_failed", Component)
 	}
 
 	// Convert to slice

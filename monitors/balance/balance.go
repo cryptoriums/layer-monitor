@@ -270,15 +270,13 @@ func (m *Monitor) fetchTipsBalance(ctx context.Context) float64 {
 			continue
 		}
 
-		// available_tips is already in loya (decimal string like "0.486070882136751635")
-		// Multiply by LoyaPerTRB to get integer loya.
+		// available_tips is already in loya as a decimal string.
 		d, err := decimal.NewFromString(result.AvailableTips)
 		if err != nil {
 			m.logger.Debug("failed to parse tips value", "value", result.AvailableTips, "error", err)
 			continue
 		}
-		loyaPerTRB := decimal.NewFromInt(monitor.LoyaPerTRB)
-		f, _ := d.Mul(loyaPerTRB).Float64()
+		f, _ := d.Float64()
 		return f
 	}
 	m.logger.Warn("failed to fetch tips balance from all API URLs")
