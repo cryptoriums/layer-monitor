@@ -28,7 +28,6 @@ import (
 	monitor "github.com/cryptoriums/layer-monitor/metrics"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
-	minttypes "github.com/tellor-io/layer/x/mint/types"
 	reportertypes "github.com/tellor-io/layer/x/reporter/types"
 	"golang.org/x/crypto/acme/autocert"
 
@@ -64,7 +63,8 @@ type Config struct {
 	TLSCacheDir string `yaml:"tls_cache_dir"` // Directory to cache certificates (default: ./certs)
 
 	// Prometheus registry shared with jail/domain monitors so their metrics appear on /metrics
-	Registry prometheus.Gatherer
+	Registry   prometheus.Gatherer
+	Registerer prometheus.Registerer
 }
 
 type Server struct {
@@ -125,6 +125,9 @@ func New(logger log.Logger, cfg Config, db blockdb.Db) (*Server, error) {
 
 	if cfg.Registry == nil {
 		cfg.Registry = prometheus.DefaultGatherer
+	}
+	if cfg.Registerer == nil {
+		cfg.Registerer = prometheus.DefaultRegisterer
 	}
 
 	s := &Server{
@@ -374,7 +377,7 @@ func (s *Server) handleAssets(w http.ResponseWriter, r *http.Request) {
 	if gzipOK && strings.Contains(r.Header.Get("Accept-Encoding"), "gzip") {
 		w.Header().Set("Content-Encoding", "gzip")
 		gz := gzip.NewWriter(w)
-		defer gz.Close()
+		defer func() { _ = gz.Close() }()
 		gzw := &gzipResponseWriter{ResponseWriter: w, Writer: gz}
 		http.StripPrefix("/assets/", fs).ServeHTTP(gzw, r)
 		return
@@ -627,64 +630,6 @@ type ReportStats struct {
 	OurReportsPct string
 }
 
-// queryReportStats returns network-wide report statistics for the lookback period.
-func (s *Server) queryReportStats(ctx context.Context) ReportStats {
-	stats := ReportStats{}
-
-	// Query total reports in lookback period
-	totalQuery := fmt.Sprintf(`
-		SELECT COUNT(*) as total_reports
-		FROM %s
-		WHERE %s >= now() - INTERVAL %d DAY
-	`, blockdb.TableNameReports, blockdb.ColTimestamp, s.cfg.LookbackPeriodDays)
-
-	rows, err := s.db.Query(ctx, totalQuery)
-	if err != nil {
-		s.logger.Error("failed to query total reports", "error", err)
-		return stats
-	}
-	defer rows.Close()
-
-	if rows.Next() {
-		if err := rows.Scan(&stats.TotalReports); err != nil {
-			s.logger.Error("failed to scan total reports", "error", err)
-		}
-	}
-
-	// Query our reporter's reports
-	if s.cfg.WalletAddress != "" {
-		ourQuery := fmt.Sprintf(`
-			SELECT COUNT(*) as our_reports
-			FROM %s
-			WHERE %s = ?
-			AND %s >= now() - INTERVAL %d DAY
-		`, blockdb.TableNameReports, blockdb.ColReporter, blockdb.ColTimestamp, s.cfg.LookbackPeriodDays)
-
-		rows, err := s.db.Query(ctx, ourQuery, s.cfg.WalletAddress)
-		if err != nil {
-			s.logger.Error("failed to query our reports", "error", err)
-			return stats
-		}
-		defer rows.Close()
-
-		if rows.Next() {
-			if err := rows.Scan(&stats.OurReports); err != nil {
-				s.logger.Error("failed to scan our reports", "error", err)
-			}
-		}
-
-		// Calculate percentage
-		if stats.TotalReports > 0 {
-			pct := float64(stats.OurReports) / float64(stats.TotalReports) * 100
-			stats.OurReportsPct = fmt.Sprintf("%.1f%%", pct)
-		} else {
-			stats.OurReportsPct = "0%"
-		}
-	}
-
-	return stats
-}
-
 // NetworkRewardStats holds aggregated reward totals for the stats period.
 type NetworkRewardStats struct {
 	TotalReporting  string // Total reporter_tip rewards across all reporters (TRB)
@@ -710,7 +655,7 @@ func (s *Server) queryNetworkRewardStats(ctx context.Context, periodDays int) Ne
 			s.logger.Error("failed to query total rewards", "reward_type", rewardType, "error", err)
 			return 0
 		}
-		defer rows.Close()
+		defer func() { _ = rows.Close() }()
 		var total float64
 		if rows.Next() {
 			_ = rows.Scan(&total)
@@ -738,7 +683,7 @@ func (s *Server) queryNetworkRewardStats(ctx context.Context, periodDays int) Ne
 			s.logger.Error("failed to query our rewards", "reward_type", rewardType, "error", err)
 			return 0
 		}
-		defer rows.Close()
+		defer func() { _ = rows.Close() }()
 		var total float64
 		if rows.Next() {
 			_ = rows.Scan(&total)
@@ -808,18 +753,6 @@ type MintRate struct {
 	Validators string // TRB per day for validators
 }
 
-// fetchMintRate returns the daily mint rate calculated from the compile-time
-// DailyMintRate constant in x/mint/types.
-// The 3/4 reporter / 1/4 validator split mirrors the keeper's QuoRaw(4) logic
-// (see x/mint/keeper/keeper.go — no on-chain param exposes this ratio).
-func (s *Server) fetchMintRate() MintRate {
-	totalTRBPerDay := float64(minttypes.DailyMintRate) / monitor.LoyaPerTRB
-	return MintRate{
-		Reporters:  fmt.Sprintf("%.2f TRB", totalTRBPerDay*3/4),
-		Validators: fmt.Sprintf("%.2f TRB", totalTRBPerDay*1/4),
-	}
-}
-
 // getValidatorRewardsMap fetches rewards for multiple validators in a single query.
 // Returns a map of validator operator address -> total rewards (loya).
 func (s *Server) getValidatorRewardsMap(ctx context.Context, validatorAddresses []string, periodDays int) map[string]uint64 {
@@ -860,7 +793,7 @@ func (s *Server) getValidatorRewardsMap(ctx context.Context, validatorAddresses 
 		s.logger.Debug("validator rewards batch query error", "error", err)
 		return make(map[string]uint64)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	rewardsMap := make(map[string]uint64)
 	for rows.Next() {
@@ -916,7 +849,7 @@ func (s *Server) getReporterRewardsMap(ctx context.Context, reporterAddresses []
 		s.logger.Debug("reporter rewards batch query error", "error", err)
 		return make(map[string]uint64)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	rewardsMap := make(map[string]uint64)
 	for rows.Next() {
@@ -1549,7 +1482,7 @@ func (s *Server) fetchValidatorsForTree(ctx context.Context) []ValidatorTree {
 			s.logger.Debug("fetchValidatorsForTree fetch error", "node", baseURL, "error", err)
 			continue
 		}
-		defer resp.Body.Close()
+		defer func() { _ = resp.Body.Close() }()
 
 		if resp.StatusCode != http.StatusOK {
 			s.logger.Debug("fetchValidatorsForTree status error", "node", baseURL, "status", resp.StatusCode)
@@ -1585,8 +1518,8 @@ func (s *Server) fetchValidatorsForTree(ctx context.Context) []ValidatorTree {
 			}
 
 			commission := "0%"
-			if v.Commission.CommissionRates.Rate.IsPositive() {
-				pct := v.Commission.CommissionRates.Rate.MulInt64(100)
+			if v.Commission.Rate.IsPositive() {
+				pct := v.Commission.Rate.MulInt64(100)
 				commission = fmt.Sprintf("%.0f%%", pct.MustFloat64())
 			}
 
@@ -1634,7 +1567,7 @@ func (s *Server) fetchReporters(ctx context.Context) map[string]*reportertypes.R
 			s.logger.Debug("fetchReporters fetch error", "node", baseURL, "error", err)
 			continue
 		}
-		defer resp.Body.Close()
+		defer func() { _ = resp.Body.Close() }()
 
 		if resp.StatusCode != http.StatusOK {
 			s.logger.Debug("fetchReporters status error", "node", baseURL, "status", resp.StatusCode)
@@ -1687,7 +1620,7 @@ func (s *Server) fetchSelectionsForReporter(ctx context.Context, reporterAddr st
 		if err != nil {
 			continue
 		}
-		defer resp.Body.Close()
+		defer func() { _ = resp.Body.Close() }()
 
 		if resp.StatusCode != http.StatusOK {
 			continue
@@ -1731,7 +1664,7 @@ func (s *Server) fetchDelegationsForSelector(ctx context.Context, selectorAddr s
 		if err != nil {
 			continue
 		}
-		defer resp.Body.Close()
+		defer func() { _ = resp.Body.Close() }()
 
 		if resp.StatusCode != http.StatusOK {
 			continue
@@ -1847,7 +1780,7 @@ func (s *Server) getMissedCyclesPerReporterFromDBForPeriod(ctx context.Context, 
 	if rows.Next() {
 		_ = rows.Scan(&totalCycles)
 	}
-	rows.Close()
+	_ = rows.Close()
 
 	if totalCycles == 0 {
 		return result, 0
@@ -1868,7 +1801,7 @@ func (s *Server) getMissedCyclesPerReporterFromDBForPeriod(ctx context.Context, 
 		s.logger.Debug("failed to query reports count for map", "error", err)
 		return result, totalCycles
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	for rows.Next() {
 		var reporter string
@@ -1914,7 +1847,7 @@ func (s *Server) getMissedBlocksPerValidatorFromDB(ctx context.Context, periodDa
 		if trows.Next() {
 			_ = trows.Scan(&totalBlocks)
 		}
-		trows.Close()
+		_ = trows.Close()
 	} else {
 		s.logger.Debug("failed to query total blocks", "error", err)
 	}
@@ -1945,7 +1878,7 @@ func (s *Server) getMissedBlocksPerValidatorFromDB(ctx context.Context, periodDa
 		s.logger.Debug("failed to query missed blocks for map", "error", err)
 		return result, totalBlocks
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	for rows.Next() {
 		var validatorAddr string

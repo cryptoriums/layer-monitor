@@ -139,7 +139,7 @@ func TestBackfillRewards(t *testing.T) {
 	var db *sql.DB
 	if !*backfillDryRun {
 		db = connectClickHouseWritable(t)
-		defer db.Close()
+		defer func() { _ = db.Close() }()
 
 		// Ensure tables exist
 		wrapped := blockdb.SQLDB{DB: db}
@@ -767,7 +767,7 @@ func initKnownReporters(db *sql.DB) error {
 	if err != nil {
 		return err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	for rows.Next() {
 		var addr string
@@ -957,7 +957,7 @@ func TestBackfillBlockSigns(t *testing.T) {
 	var db *sql.DB
 	if !*backfillDryRun {
 		db = connectClickHouseWritable(t)
-		defer db.Close()
+		defer func() { _ = db.Close() }()
 
 		// Ensure tables exist
 		wrapped := blockdb.SQLDB{DB: db}
@@ -1357,7 +1357,7 @@ func TestBackfillAll(t *testing.T) {
 	var db *sql.DB
 	if !*backfillDryRun {
 		db = connectClickHouseWritable(t)
-		defer db.Close()
+		defer func() { _ = db.Close() }()
 
 		wrapped := blockdb.SQLDB{DB: db}
 		if err := blockdb.EnsureTables(ctx, wrapped); err != nil {

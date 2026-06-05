@@ -295,7 +295,7 @@ func (m *Monitor) doGet(ctx context.Context, url string) ([]byte, bool) {
 		m.logger.Debug("request error", "url", url, "error", err)
 		return nil, false
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		m.logger.Debug("request status error", "url", url, "status", resp.StatusCode)

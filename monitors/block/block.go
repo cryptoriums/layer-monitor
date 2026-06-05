@@ -14,6 +14,7 @@ import (
 	ctypes "github.com/cometbft/cometbft/types"
 	"github.com/cryptoriums/layer-monitor/db"
 	"github.com/cryptoriums/layer-monitor/monitors/block/processor"
+	"github.com/prometheus/client_golang/prometheus"
 	"golang.org/x/sync/errgroup"
 
 	"cosmossdk.io/log"
@@ -44,6 +45,7 @@ type Config struct {
 	FetchWorkers              int           `yaml:"fetch_workers"`               // Number of parallel block fetchers (default 10)
 	WalletAddress             string        `yaml:"wallet_address"`              // Our wallet address (tellor1xxx) for "our" metric labels
 	ValidatorConsensusAddress string        `yaml:"validator_consensus_address"` // Our validator consensus address (tellorvalcons) for "our" metric labels
+	Registerer                prometheus.Registerer
 }
 
 // Monitor polls ABCI endpoints to ingest blocks without using websockets.
@@ -97,6 +99,7 @@ func NewWithFetcher(ctx context.Context, logger log.Logger, cfg Config, db db.Db
 		WalletAddress:             cfg.WalletAddress,
 		ValidatorConsensusAddress: cfg.ValidatorConsensusAddress,
 		LayerAPIURLs:              cfg.LayerAPIURLs,
+		Registerer:                cfg.Registerer,
 	}
 
 	return &Monitor{
