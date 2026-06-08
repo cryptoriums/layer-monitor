@@ -3,168 +3,199 @@
   "uid": "layer-missed-events",
   "timezone": "browser",
   "schemaVersion": 38,
-  "version": 1,
+  "version": 9,
   "refresh": "30s",
   "editable": true,
   "graphTooltip": 1,
-  "tags": ["layer", "monitor", "omission"],
+  "tags": [
+    "layer",
+    "monitor",
+    "omission"
+  ],
   "time": {
     "from": "now-24h",
     "to": "now"
   },
-  "templating": {"list": []},
-  "annotations": {"list": []},
+  "templating": {
+    "list": []
+  },
+  "annotations": {
+    "list": []
+  },
   "panels": [
     {
       "id": 1,
-      "type": "stat",
-      "title": "Missed Validators",
-      "description": "Cumulative missed validator block signatures since Prometheus started",
-      "datasource": {"type": "prometheus", "uid": "prometheus"},
-      "targets": [{"refId": "A", "expr": "layerc_processor_missed_validator_blocks_total", "legendFormat": "Missed Validators"}],
-      "fieldConfig": {
-        "defaults": {
-          "color": {"mode": "thresholds"},
-          "decimals": 0,
-          "unit": "none",
-          "thresholds": {"mode": "absolute", "steps": [{"color": "red", "value": null}]}
-        }
-      },
-      "options": {
-        "colorMode": "value",
-        "graphMode": "area",
-        "justifyMode": "auto",
-        "orientation": "auto",
-        "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false},
-        "textMode": "auto"
-      },
-      "gridPos": {"h": 8, "w": 6, "x": 0, "y": 0}
-    },
-    {
-      "id": 2,
-      "type": "stat",
-      "title": "Total Validator Checks",
-      "description": "Cumulative total validator block signature checks since Prometheus started",
-      "datasource": {"type": "prometheus", "uid": "prometheus"},
-      "targets": [{"refId": "A", "expr": "layerc_processor_validator_checks_total", "legendFormat": "Total Validator Checks"}],
-      "fieldConfig": {
-        "defaults": {
-          "color": {"mode": "thresholds"},
-          "decimals": 0,
-          "unit": "none",
-          "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}]}
-        }
-      },
-      "options": {
-        "colorMode": "value",
-        "graphMode": "area",
-        "justifyMode": "auto",
-        "orientation": "auto",
-        "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false},
-        "textMode": "auto"
-      },
-      "gridPos": {"h": 8, "w": 6, "x": 6, "y": 0}
-    },
-    {
-      "id": 3,
-      "type": "stat",
-      "title": "Our Reporter Missed",
-      "description": "Cumulative cycles our reporter missed since Prometheus started. Divide by Total Cycles for miss rate.",
-      "datasource": {"type": "prometheus", "uid": "prometheus"},
-      "targets": [{"refId": "A", "expr": "layerc_processor_missed_our_reporter_cycles_total", "legendFormat": "Our Reporter Missed"}],
-      "fieldConfig": {
-        "defaults": {
-          "color": {"mode": "thresholds"},
-          "decimals": 0,
-          "unit": "none",
-          "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "red", "value": 1}]}
-        }
-      },
-      "options": {
-        "colorMode": "value",
-        "graphMode": "area",
-        "justifyMode": "auto",
-        "orientation": "auto",
-        "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false},
-        "textMode": "auto"
-      },
-      "gridPos": {"h": 8, "w": 6, "x": 12, "y": 0}
-    },
-    {
-      "id": 4,
-      "type": "stat",
-      "title": "Total Cycles",
-      "description": "Cumulative total reporter cycles completed since Prometheus started (one per cycle). Divide Our Reporter Missed by this for miss rate.",
-      "datasource": {"type": "prometheus", "uid": "prometheus"},
-      "targets": [{"refId": "A", "expr": "layerc_processor_reporter_cycles_total", "legendFormat": "Total Cycles"}],
-      "fieldConfig": {
-        "defaults": {
-          "color": {"mode": "thresholds"},
-          "decimals": 0,
-          "unit": "none",
-          "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}]}
-        }
-      },
-      "options": {
-        "colorMode": "value",
-        "graphMode": "area",
-        "justifyMode": "auto",
-        "orientation": "auto",
-        "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false},
-        "textMode": "auto"
-      },
-      "gridPos": {"h": 8, "w": 6, "x": 18, "y": 0}
-    },
-    {
-      "id": 5,
       "type": "timeseries",
-      "title": "All States Over Time",
-      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "title": "Our Validator Missed",
+      "description": "Cumulative block signatures our validator has missed, plotted over time. The line steps up each time a block is missed, so a rising section shows when misses occurred and a flat section means none. Counted even while the validator is jailed or out of the active set. Hover any point to read the running total and time. [Prometheus]",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
       "targets": [
-        {"refId": "A", "expr": "layerc_processor_missed_validator_blocks_total", "legendFormat": "Missed Validators"},
-        {"refId": "B", "expr": "layerc_processor_validator_checks_total", "legendFormat": "Total Validator Checks"},
-        {"refId": "C", "expr": "layerc_processor_missed_our_reporter_cycles_total", "legendFormat": "Our Reporter Missed"},
-        {"refId": "D", "expr": "layerc_processor_reporter_cycles_total", "legendFormat": "Total Cycles"}
+        {
+          "refId": "A",
+          "expr": "layerc_processor_missed_our_validator_blocks_total",
+          "legendFormat": "Our Validator Missed (cumulative)"
+        }
       ],
       "fieldConfig": {
         "defaults": {
-          "color": {"mode": "palette-classic"},
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "red"
+          },
           "custom": {
-            "axisCenteredZero": false,
-            "axisColorMode": "text",
-            "axisLabel": "Count",
+            "axisLabel": "Missed (cumulative)",
             "axisPlacement": "auto",
             "barAlignment": 0,
             "drawStyle": "line",
-            "fillOpacity": 10,
+            "fillOpacity": 15,
             "gradientMode": "none",
-            "hideFrom": {"legend": false, "tooltip": false, "viz": false},
-            "lineInterpolation": "linear",
+            "lineInterpolation": "stepAfter",
             "lineWidth": 2,
             "pointSize": 5,
-            "scaleDistribution": {"type": "linear"},
+            "scaleDistribution": {
+              "type": "linear"
+            },
             "showPoints": "auto",
             "spanNulls": false,
-            "stacking": {"group": "A", "mode": "none"},
-            "thresholdsStyle": {"mode": "off"}
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
           },
           "mappings": [],
-          "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}]},
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 1
+              }
+            ]
+          },
           "decimals": 0,
           "unit": "none"
         }
       },
       "options": {
         "legend": {
-          "calcs": ["last", "min", "max"],
+          "calcs": [
+            "last",
+            "min",
+            "max"
+          ],
           "displayMode": "table",
-          "placement": "right",
+          "placement": "bottom",
           "showLegend": true
         },
-        "tooltip": {"mode": "multi", "sort": "desc"}
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        }
       },
       "pluginVersion": "10.0.0",
-      "gridPos": {"h": 8, "w": 24, "x": 0, "y": 8}
+      "gridPos": {
+        "h": 9,
+        "w": 12,
+        "x": 0,
+        "y": 0
+      }
+    },
+    {
+      "id": 3,
+      "type": "timeseries",
+      "title": "Our Reporter Missed",
+      "description": "Cumulative reporter cycles our reporter has missed, plotted over time. The line steps up each time a report is missed, so a rising section shows when misses occurred and a flat section means none. Hover any point to read the running total and time. [Prometheus]",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "layerc_processor_missed_our_reporter_cycles_total",
+          "legendFormat": "Our Reporter Missed (cumulative)"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "orange"
+          },
+          "custom": {
+            "axisLabel": "Missed (cumulative)",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "drawStyle": "line",
+            "fillOpacity": 15,
+            "gradientMode": "none",
+            "lineInterpolation": "stepAfter",
+            "lineWidth": 2,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "auto",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 1
+              }
+            ]
+          },
+          "decimals": 0,
+          "unit": "none"
+        }
+      },
+      "options": {
+        "legend": {
+          "calcs": [
+            "last",
+            "min",
+            "max"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        }
+      },
+      "pluginVersion": "10.0.0",
+      "gridPos": {
+        "h": 9,
+        "w": 12,
+        "x": 12,
+        "y": 0
+      }
     }
   ]
 }
