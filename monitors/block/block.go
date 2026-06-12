@@ -25,6 +25,11 @@ import (
 type BlockFetcher interface {
 	// LatestHeight returns the latest block height on the chain.
 	LatestHeight(ctx context.Context) (int64, error)
+	// EarliestHeight returns the lowest block height still retained by the
+	// nodes (the floor below which blocks have been pruned and are no longer
+	// fetchable). Used to keep the processor from starting below the pruned
+	// floor and wedging on unavailable blocks.
+	EarliestHeight(ctx context.Context) (int64, error)
 	// FetchBlock returns block data for the specified height.
 	FetchBlock(ctx context.Context, height int64) (ctypes.EventDataNewBlock, error)
 }
@@ -130,6 +135,16 @@ func (m *Monitor) Run(ctx context.Context) error {
 		}
 		if lastProcessed >= nextHeight {
 			nextHeight = lastProcessed + 1
+		} else if err != nil {
+			// No progress and an error: the nodes may have pruned past our
+			// cursor (every block from nextHeight up is gone). Re-check the
+			// earliest available height and skip the unavailable gap so we don't
+			// retry pruned blocks forever.
+			if earliest, eErr := m.fetcher.EarliestHeight(ctx); eErr == nil && earliest > nextHeight {
+				m.logger.Warn("skipping pruned gap; advancing to earliest available height",
+					"from", nextHeight, "to", earliest)
+				nextHeight = earliest
+			}
 		}
 
 		select {
@@ -234,15 +249,38 @@ func (m *Monitor) startHeight(ctx context.Context) (int64, error) {
 		return 0, err
 	}
 
-	// If backfill disabled (0 days), skip to current chain height
+	start := m.computeStart(last, latest)
+
+	// Never start below the pruned floor. If the nodes have pruned everything
+	// below `earliest`, starting at the requested height would wedge the
+	// processor retrying blocks that no node can serve — so clamp up to the
+	// earliest available height and ingest from the oldest block still retained.
+	// Best-effort: if earliest can't be determined, don't clamp.
+	if earliest, eErr := m.fetcher.EarliestHeight(ctx); eErr != nil {
+		m.logger.Debug("could not determine earliest available height; not clamping start", "error", eErr)
+	} else if earliest > start {
+		m.logger.Info("clamping start to earliest available height (nodes are pruned)",
+			"requested_start", start,
+			"earliest_available", earliest,
+		)
+		start = earliest
+	}
+
+	return start, nil
+}
+
+// computeStart returns the desired start height from the configured backfill
+// lookback and the last stored height, before any pruned-floor clamping.
+func (m *Monitor) computeStart(last, latest int64) int64 {
+	// If backfill disabled (0 days), skip to current chain height.
 	if m.cfg.BackfillLookback <= 0 {
 		if latest > last {
 			last = latest
 		}
-		return last + 1, nil
+		return last + 1
 	}
 
-	// Calculate the lookback height (approximate: ~1.5 seconds per block)
+	// Calculate the lookback height (approximate: ~1.5 seconds per block).
 	const blocksPerDay = 57600 // 24 * 60 * 60 / 1.5
 	lookbackBlocks := int64(m.cfg.BackfillLookback * blocksPerDay)
 	lookbackHeight := latest - lookbackBlocks
@@ -250,32 +288,30 @@ func (m *Monitor) startHeight(ctx context.Context) (int64, error) {
 		lookbackHeight = 1
 	}
 
-	// If we have stored data
 	if last > 0 {
-		// If last stored block is within lookback period, continue from there
+		// If last stored block is within the lookback period, continue from there.
 		if last >= lookbackHeight {
 			m.logger.Info("resuming from last stored block",
 				"last_stored", last,
 				"lookback_height", lookbackHeight,
 				"lookback_days", m.cfg.BackfillLookback,
 			)
-			return last + 1, nil
+			return last + 1
 		}
-		// Last stored block is older than lookback period, start from lookback height
+		// Last stored block is older than the lookback period.
 		m.logger.Info("last stored block too old, starting from lookback height",
 			"last_stored", last,
 			"lookback_height", lookbackHeight,
 			"lookback_days", m.cfg.BackfillLookback,
 		)
-		return lookbackHeight, nil
+		return lookbackHeight
 	}
 
-	// No stored data: start from lookback height
 	m.logger.Info("no stored data, starting from lookback height",
 		"lookback_height", lookbackHeight,
 		"lookback_days", m.cfg.BackfillLookback,
 	)
-	return lookbackHeight, nil
+	return lookbackHeight
 }
 
 func (m *Monitor) lastStoredHeight(ctx context.Context) (int64, error) {
@@ -359,6 +395,69 @@ func (f *rpcFetcher) LatestHeight(ctx context.Context) (int64, error) {
 		}
 	}
 
+	if len(errs) > 0 {
+		return 0, errs[0]
+	}
+	return 0, errors.New("unable to query any node")
+}
+
+// EarliestHeight implements BlockFetcher. It returns the minimum
+// earliest-available height across all responding nodes — the lowest height
+// that is still fetchable from at least one node. A height below this has been
+// pruned everywhere. Unlike LatestHeight, it waits for all nodes so it can take
+// the most permissive (smallest) floor.
+func (f *rpcFetcher) EarliestHeight(ctx context.Context) (int64, error) {
+	type res struct {
+		height int64
+		err    error
+	}
+	resCh := make(chan res, len(f.clients))
+
+	qctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	for _, client := range f.clients {
+		cli := client
+		go func() {
+			rCtx, rCancel := context.WithTimeout(qctx, rpcTimeout)
+			defer rCancel()
+			resp, err := cli.Status(rCtx)
+			if err != nil {
+				select {
+				case resCh <- res{err: err}:
+				case <-qctx.Done():
+				}
+				return
+			}
+			select {
+			case resCh <- res{height: resp.SyncInfo.EarliestBlockHeight}:
+			case <-qctx.Done():
+			}
+		}()
+	}
+
+	var (
+		minEarliest int64 = -1
+		errs        []error
+	)
+	for i := 0; i < len(f.clients); i++ {
+		select {
+		case r := <-resCh:
+			if r.err != nil {
+				errs = append(errs, r.err)
+				continue
+			}
+			if minEarliest < 0 || r.height < minEarliest {
+				minEarliest = r.height
+			}
+		case <-qctx.Done():
+			return 0, qctx.Err()
+		}
+	}
+
+	if minEarliest >= 0 {
+		return minEarliest, nil
+	}
 	if len(errs) > 0 {
 		return 0, errs[0]
 	}

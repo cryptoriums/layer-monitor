@@ -167,6 +167,7 @@ type mockFetcher struct {
 	blocks         map[int64]ctypes.EventDataNewBlock
 	minHeight      int64
 	maxHeight      int64
+	earliestHeight int64 // simulated pruned floor; 0 => unknown (no clamp)
 	firstCall      bool
 	fetchedHeights map[int64]struct{} // Track which heights were fetched (for backfill testing)
 }
@@ -238,6 +239,12 @@ func (m *mockFetcher) LatestHeight(_ context.Context) (int64, error) {
 		return m.minHeight - 1, nil
 	}
 	return m.maxHeight, nil
+}
+
+func (m *mockFetcher) EarliestHeight(_ context.Context) (int64, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.earliestHeight, nil
 }
 
 func (m *mockFetcher) FetchBlock(_ context.Context, height int64) (ctypes.EventDataNewBlock, error) {
