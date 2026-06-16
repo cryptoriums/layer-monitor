@@ -296,6 +296,13 @@ func TestDeduplication(t *testing.T) {
 			wrappedDB, err := blockdb.New(ctx, sqlDB)
 			require.NoError(t, err)
 
+			// Clear tables before each subtest to ensure isolation (chdb "" is a
+			// shared session, so rows would otherwise accumulate across subtests).
+			for _, table := range []string{blockdb.TableNameTxs, blockdb.TableNameReports, blockdb.TableNameBlockSigns} {
+				_, err = sqlDB.Exec("TRUNCATE TABLE " + table)
+				require.NoError(t, err)
+			}
+
 			// Merge all node streams into a single mock fetcher that returns all blocks
 			// The test verifies deduplication by checking that the same block from
 			// multiple "nodes" results in only one DB entry
