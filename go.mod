@@ -289,7 +289,7 @@ replace go.opentelemetry.io/auto/sdk => go.opentelemetry.io/auto/sdk v1.1.0
 
 require github.com/tellor-io/bridge-remote-signer/api v0.0.0
 
-replace github.com/tellor-io/bridge-remote-signer/api => /home/tellor-io/bridge-remote-signer/api
+replace github.com/tellor-io/bridge-remote-signer/api => ./vendor-api
 
 // Pin grpc to the version already used by this module so the bridge-remote-signer/api
 // dependency cannot upgrade it (which would pull in incompatible otel semconv versions).
