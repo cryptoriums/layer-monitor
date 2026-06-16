@@ -1,0 +1,4 @@
+run:
+  # Package loading on CI (cold module/build cache) exceeds the 1m default and
+  # fails with "context deadline exceeded". Give it ample headroom.
+  timeout: 10m
