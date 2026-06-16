@@ -28,5 +28,11 @@ jobs:
         with:
           go-version: '1.24'
           cache: true
+      - name: Install libchdb
+        # chdb-go's init() dlopens libchdb.so and panics if it's missing, so the
+        # block/web packages can't even be imported under `go test` without it.
+        run: |
+          curl -sL https://lib.chdb.io | bash
+          sudo ldconfig
       - name: Run tests
         run: go test -short ./...
