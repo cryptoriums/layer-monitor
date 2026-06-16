@@ -82,7 +82,7 @@ func TestListReports(t *testing.T) {
 
 	apiURLs := parseAPIURLs()
 	if len(apiURLs) == 0 {
-		t.Fatal("LAYER_API_URLS not set")
+		t.Fatal("API_URLS not set")
 	}
 
 	ctx := context.Background()
@@ -354,7 +354,7 @@ func TestQueryOpenDisputes(t *testing.T) {
 
 	apiURLs := parseAPIURLs()
 	if len(apiURLs) == 0 {
-		t.Fatal("LAYER_API_URLS not set")
+		t.Fatal("API_URLS not set")
 	}
 
 	ctx := context.Background()

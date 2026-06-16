@@ -13,7 +13,7 @@ import (
 var envFile = flag.String("env-file", "", "Path to .env file to load before running tests")
 
 func parseAPIURLs() []string {
-	urlsStr := os.Getenv("LAYER_API_URLS")
+	urlsStr := os.Getenv("API_URLS")
 	if urlsStr == "" {
 		return nil
 	}
