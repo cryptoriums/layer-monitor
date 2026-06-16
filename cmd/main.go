@@ -330,7 +330,7 @@ func parseMonitorConfig() (monitorConfig, error) {
 	var missing []string
 
 	nodesStr := requireEnv("RPC_NODES", &missing)
-	apiURLsStr := requireEnv("LAYER_API_URLS", &missing)
+	apiURLsStr := requireEnv("API_URLS", &missing)
 
 	cfg := monitorConfig{
 		clickhouseHost:      requireEnv("CLICKHOUSE_HOST", &missing),

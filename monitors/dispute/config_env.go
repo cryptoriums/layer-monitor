@@ -10,7 +10,7 @@ import (
 func LoadConfigFromEnv() Config {
 	cfg := Config{CheckInterval: time.Second}
 
-	if urls := os.Getenv("LAYER_API_URLS"); urls != "" {
+	if urls := os.Getenv("API_URLS"); urls != "" {
 		for _, url := range strings.Split(urls, ",") {
 			if trimmed := strings.TrimSpace(url); trimmed != "" {
 				cfg.LayerAPIURLs = append(cfg.LayerAPIURLs, trimmed)
