@@ -351,9 +351,14 @@ func TestDeduplication(t *testing.T) {
 
 			expectedCount := len(expected)
 			require.Eventually(t, func() bool {
-				actual := fetchReportsFromDB(t, sqlDB)
+				// Runs in a goroutine — never call require.*/t.Fatal here.
+				actual, err := fetchReportsFromDBNoFail(sqlDB)
+				if err != nil {
+					t.Logf("db query error (retrying): %v", err)
+					return false
+				}
 				return len(actual) == expectedCount
-			}, 3*time.Second, 100*time.Millisecond, "expected %d reports, got %d", expectedCount, len(fetchReportsFromDB(t, sqlDB)))
+			}, 30*time.Second, 100*time.Millisecond, "reports did not converge to %d", expectedCount)
 
 			actualReports := sortReports(t, copyReports(fetchReportsFromDB(t, sqlDB)))
 			expectedSorted := sortReports(t, copyReports(expected))

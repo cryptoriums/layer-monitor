@@ -13,10 +13,16 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"time"
 
 	abci "github.com/cometbft/cometbft/abci/types"
 	ctypes "github.com/cometbft/cometbft/types"
 )
+
+// blockTime is a valid, in-range timestamp for the block_time DateTime64 column.
+// A zero time (year 0001) is out of ClickHouse's DateTime range and makes inserts
+// fail with "Cannot read DateTime" on stricter libchdb builds.
+var blockTime = time.Unix(1700000000, 0).UTC()
 
 func attr(k, v string) abci.EventAttribute { return abci.EventAttribute{Key: k, Value: v} }
 
@@ -42,7 +48,7 @@ func newReportEvent(height int64, reporter, querySeed string) abci.Event {
 
 func block(height int64, evs ...abci.Event) ctypes.EventDataNewBlock {
 	return ctypes.EventDataNewBlock{
-		Block: &ctypes.Block{Header: ctypes.Header{Height: height}},
+		Block: &ctypes.Block{Header: ctypes.Header{Height: height, Time: blockTime}},
 		ResultFinalizeBlock: abci.ResponseFinalizeBlock{
 			TxResults: []*abci.ExecTxResult{{Code: 0, Events: evs}},
 		},

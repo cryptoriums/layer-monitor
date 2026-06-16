@@ -76,20 +76,20 @@ func extractExpectedReports(t *testing.T, fixtures []ctypes.EventDataNewBlock) [
 	return reports
 }
 
-func fetchReportsFromDB(t *testing.T, db *sql.DB) []types.MicroReport {
-	t.Helper()
-
+// fetchReportsFromDBNoFail queries the reports table and returns an error instead
+// of failing the test. Use this inside assert/require.Eventually closures: those
+// run in a separate goroutine, and calling require.*/t.Fatal there panics with
+// "Fail in goroutine after test has completed" once the closure outlives the test.
+func fetchReportsFromDBNoFail(db *sql.DB) ([]types.MicroReport, error) {
 	query := fmt.Sprintf("SELECT %s, %s, %s, %s, %s, %s, %s, %s, %s, %s FROM %s ORDER BY %s, %s", //nolint:gosec // G201: table name is constant
 		blockdb.ColReporter, blockdb.ColPower, blockdb.ColQueryType, blockdb.ColQueryID, blockdb.ColAggregateMethod,
 		blockdb.ColValue, blockdb.ColTimestamp, blockdb.ColCyclelist, blockdb.ColBlockNumber, blockdb.ColMetaID,
 		blockdb.TableNameReports, blockdb.ColBlockNumber, blockdb.ColReporter)
 	rows, err := db.QueryContext(context.Background(), query)
-	require.NoError(t, err)
-	defer func() {
-		if closeErr := rows.Close(); closeErr != nil {
-			t.Logf("failed to close rows: %v", closeErr)
-		}
-	}()
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
 
 	var reports []types.MicroReport
 	for rows.Next() {
@@ -105,10 +105,14 @@ func fetchReportsFromDB(t *testing.T, db *sql.DB) []types.MicroReport {
 			blockNumber     uint64
 			metaID          uint64
 		)
-		require.NoError(t, rows.Scan(&reporter, &power, &queryType, &queryIDStr, &aggregateMethod, &value, &ts, &cycle, &blockNumber, &metaID))
+		if err := rows.Scan(&reporter, &power, &queryType, &queryIDStr, &aggregateMethod, &value, &ts, &cycle, &blockNumber, &metaID); err != nil {
+			return nil, err
+		}
 
 		queryID, err := blockprocessor.DecodeQueryID(queryIDStr)
-		require.NoError(t, err)
+		if err != nil {
+			return nil, err
+		}
 
 		reports = append(reports, types.MicroReport{
 			Reporter:        reporter,
@@ -123,8 +127,18 @@ func fetchReportsFromDB(t *testing.T, db *sql.DB) []types.MicroReport {
 			MetaId:          metaID,
 		})
 	}
-	require.NoError(t, rows.Err())
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
 
+	return reports, nil
+}
+
+// fetchReportsFromDB is the test-failing wrapper for use in the main goroutine.
+func fetchReportsFromDB(t *testing.T, db *sql.DB) []types.MicroReport {
+	t.Helper()
+	reports, err := fetchReportsFromDBNoFail(db)
+	require.NoError(t, err)
 	return reports
 }
 
