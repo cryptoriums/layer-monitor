@@ -128,11 +128,21 @@ func runMonitor(cmd *cobra.Command, _ []string) {
 
 	validatorConsensusAddr := addr.FetchValcons(cfg.layerAPIURLs, walletAddress)
 	if validatorConsensusAddr == "" {
+		// API derivation failed (e.g. endpoints unreachable). Fall back to the
+		// valcons previously stored in the DB before refusing to start — same as
+		// the wallet address falls back to the DB.
+		if dbVal, err := db.GetAddress(ctx, database, db.AddressNameValidatorConsensus); err == nil && dbVal != "" {
+			validatorConsensusAddr = dbVal
+			logger.Warn("could not derive validator consensus address from API, using value stored in DB",
+				"valcons", validatorConsensusAddr)
+		}
+	}
+	if validatorConsensusAddr == "" {
 		logger.Error("failed to derive validator consensus address from wallet - refusing to start",
 			"wallet", walletAddress,
 			"operator_addr", addr.ToValidatorOperator(walletAddress),
 			"reason", "validator metrics and alerts would not work",
-			"solution", "ensure wallet is a validator and API endpoints are reachable")
+			"solution", "ensure wallet is a validator and API endpoints are reachable, or that a valcons is stored in the DB")
 		os.Exit(1)
 	}
 	logger.Info("validator consensus address derived", "wallet", walletAddress, "valcons", validatorConsensusAddr)
