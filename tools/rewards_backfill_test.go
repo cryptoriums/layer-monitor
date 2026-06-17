@@ -39,7 +39,7 @@ var (
 	backfillStart         = flag.Int64("backfill-start", 0, "Start block height for backfill")
 	backfillEnd           = flag.Int64("backfill-end", 0, "End block height for backfill")
 	backfillRPC           = flag.String("backfill-rpc", "", "RPC endpoint URL (defaults to LAYER_RPC_URLS env)")
-	backfillAPI           = flag.String("backfill-api", "", "REST API URL for withdrawal queries (defaults to LAYER_API_URLS env)")
+	backfillAPI           = flag.String("backfill-api", "", "REST API URL for withdrawal queries (defaults to API_URLS env)")
 	backfillWorkers       = flag.Int("backfill-workers", 10, "Number of parallel fetch workers")
 	backfillDryRun        = flag.Bool("backfill-dry-run", false, "Don't insert to DB, just show what would be inserted")
 	backfillBaselineBlock = flag.Int64("backfill-baseline-block", 0, "Block height to fetch baseline cumulative values from (usually start-1)")
@@ -113,7 +113,7 @@ func TestBackfillRewards(t *testing.T) {
 	if apiURL == "" {
 		apiURLs := parseAPIURLs()
 		if len(apiURLs) == 0 {
-			t.Fatal("LAYER_API_URLS not set and -backfill-api not provided")
+			t.Fatal("API_URLS not set and -backfill-api not provided")
 		}
 		apiURL = apiURLs[0]
 	}
@@ -139,7 +139,7 @@ func TestBackfillRewards(t *testing.T) {
 	var db *sql.DB
 	if !*backfillDryRun {
 		db = connectClickHouseWritable(t)
-		defer db.Close()
+		defer func() { _ = db.Close() }()
 
 		// Ensure tables exist
 		wrapped := blockdb.SQLDB{DB: db}
@@ -767,7 +767,7 @@ func initKnownReporters(db *sql.DB) error {
 	if err != nil {
 		return err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	for rows.Next() {
 		var addr string
@@ -957,7 +957,7 @@ func TestBackfillBlockSigns(t *testing.T) {
 	var db *sql.DB
 	if !*backfillDryRun {
 		db = connectClickHouseWritable(t)
-		defer db.Close()
+		defer func() { _ = db.Close() }()
 
 		// Ensure tables exist
 		wrapped := blockdb.SQLDB{DB: db}
@@ -1335,7 +1335,7 @@ func TestBackfillAll(t *testing.T) {
 	if apiURL == "" {
 		apiURLs := parseAPIURLs()
 		if len(apiURLs) == 0 {
-			t.Fatal("LAYER_API_URLS not set and -backfill-api not provided")
+			t.Fatal("API_URLS not set and -backfill-api not provided")
 		}
 		apiURL = apiURLs[0]
 	}
@@ -1357,7 +1357,7 @@ func TestBackfillAll(t *testing.T) {
 	var db *sql.DB
 	if !*backfillDryRun {
 		db = connectClickHouseWritable(t)
-		defer db.Close()
+		defer func() { _ = db.Close() }()
 
 		wrapped := blockdb.SQLDB{DB: db}
 		if err := blockdb.EnsureTables(ctx, wrapped); err != nil {

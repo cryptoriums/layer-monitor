@@ -215,7 +215,7 @@ func (m *Monitor) doFetchReporters(ctx context.Context, url string, cdc *codec.P
 		m.logger.Debug("reporter fetch error", "url", url, "error", err)
 		return nil, false
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		m.logger.Debug("reporter fetch status error", "url", url, "status", resp.StatusCode)
@@ -252,7 +252,7 @@ func (m *Monitor) fetchAllValidators(ctx context.Context) []stakingtypes.Validat
 			m.logger.Debug("validator fetch error", "url", url, "error", err)
 			continue
 		}
-		defer resp.Body.Close()
+		defer func() { _ = resp.Body.Close() }()
 
 		if resp.StatusCode != http.StatusOK {
 			m.logger.Debug("validator fetch status error", "url", url, "status", resp.StatusCode)

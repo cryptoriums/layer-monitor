@@ -369,7 +369,7 @@ func GetAddress(ctx context.Context, database Db, name string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("query address %s: %w", name, err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	if rows.Next() {
 		var address string
@@ -446,7 +446,7 @@ func GetOpenDisputes(ctx context.Context, database Db) ([]uint64, error) {
 	if err != nil {
 		return nil, fmt.Errorf("query open disputes: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var disputes []uint64
 	for rows.Next() {

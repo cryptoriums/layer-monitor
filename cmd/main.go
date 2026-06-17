@@ -19,6 +19,7 @@ import (
 	"github.com/cryptoriums/layer-monitor/monitors/block"
 	"github.com/cryptoriums/layer-monitor/monitors/domain"
 	"github.com/cryptoriums/layer-monitor/monitors/jail"
+	"github.com/cryptoriums/layer-monitor/signerclient"
 	"github.com/cryptoriums/layer-monitor/web"
 	"github.com/joho/godotenv"
 	"github.com/prometheus/client_golang/prometheus"
@@ -102,7 +103,7 @@ func runMonitor(cmd *cobra.Command, _ []string) {
 		logger.Error("failed to connect to clickhouse", "error", err)
 		os.Exit(1)
 	}
-	defer sqlDB.Close()
+	defer func() { _ = sqlDB.Close() }()
 
 	database, err := db.New(ctx, sqlDB)
 	if err != nil {
@@ -117,25 +118,12 @@ func runMonitor(cmd *cobra.Command, _ []string) {
 	}
 	logger.Info("TTL configured on all ClickHouse tables (1 month)")
 
-	walletAddress := os.Getenv("WALLET_ADDRESS")
-	if walletAddress != "" {
-		logger.Info("reporter address from WALLET_ADDRESS env", "wallet", walletAddress)
-		if err := db.UpsertAddress(ctx, database, db.AddressNameReporter, walletAddress); err != nil {
-			logger.Error("failed to store reporter address from env", "error", err)
-			os.Exit(1)
-		}
-	} else {
-		var err error
-		walletAddress, err = db.ReporterAddr(ctx, database)
-		if err != nil {
-			logger.Error("failed to get reporter address from DB", "error", err)
-			os.Exit(1)
-		}
-		if walletAddress == "" {
-			logger.Error("reporter address not found in DB - set WALLET_ADDRESS env var or ensure reporter has unlocked first")
-			os.Exit(1)
-		}
-		logger.Info("reporter address read from DB", "wallet", walletAddress)
+	walletAddress := resolveWalletAddress(ctx, logger, database, cfg.signer)
+	if walletAddress == "" {
+		logger.Error("could not determine reporter wallet address from the remote signer or the DB - refusing to start",
+			"reason", "the wallet address is required for validator/reporter metrics, alerts, and the status page",
+			"solution", "make the remote signer reachable (REMOTE_SIGNER_ADDR + mTLS certs), or ensure the reporter has run at least once so the address is stored in the DB")
+		os.Exit(1)
 	}
 
 	validatorConsensusAddr := addr.FetchValcons(cfg.layerAPIURLs, walletAddress)
@@ -170,6 +158,7 @@ func runMonitor(cmd *cobra.Command, _ []string) {
 		FetchWorkers:              cfg.fetchWorkers,
 		WalletAddress:             walletAddress,
 		ValidatorConsensusAddress: validatorConsensusAddr,
+		Registerer:                reg,
 	}
 
 	blockMonitor, err := block.New(ctx, logger, monitorCfg, database)
@@ -271,6 +260,50 @@ func runMonitor(cmd *cobra.Command, _ []string) {
 	logger.Info("monitor stopped")
 }
 
+// signerQueryTimeout bounds the startup wallet-address lookup so a down or slow
+// signer cannot stall monitor startup — we fall back to the DB instead.
+const signerQueryTimeout = 5 * time.Second
+
+// resolveWalletAddress determines the reporter wallet address at startup.
+//
+// Order of precedence:
+//  1. The remote signer (authoritative — it holds the key). On success the
+//     address is persisted to the DB so it survives a later signer outage.
+//  2. The address already stored in the DB (fallback when the signer is
+//     unconfigured or unreachable).
+//
+// Returns "" only when neither source yields an address; the caller treats
+// that as fatal.
+func resolveWalletAddress(ctx context.Context, logger log.Logger, database db.Db, cfg signerclient.Config) string {
+	if cfg.Enabled() {
+		addr, err := signerclient.FetchAddressWithTimeout(ctx, cfg, signerQueryTimeout)
+		if err != nil {
+			logger.Warn("could not fetch wallet address from remote signer, falling back to DB",
+				"signer_addr", cfg.Addr, "error", err)
+		} else {
+			logger.Info("reporter address fetched from remote signer", "wallet", addr, "signer_addr", cfg.Addr)
+			if err := db.UpsertAddress(ctx, database, db.AddressNameReporter, addr); err != nil {
+				// Non-fatal: we already have the address; persisting is a convenience
+				// so the next startup can fall back to it if the signer is down.
+				logger.Warn("failed to persist signer-provided reporter address to DB", "error", err)
+			}
+			return addr
+		}
+	} else {
+		logger.Info("REMOTE_SIGNER_ADDR not set, using reporter address from DB")
+	}
+
+	addr, err := db.ReporterAddr(ctx, database)
+	if err != nil {
+		logger.Error("failed to read reporter address from DB", "error", err)
+		return ""
+	}
+	if addr != "" {
+		logger.Info("reporter address read from DB", "wallet", addr)
+	}
+	return addr
+}
+
 type monitorConfig struct {
 	clickhouseHost      string
 	clickhousePort      string
@@ -289,13 +322,14 @@ type monitorConfig struct {
 	publicRPCURL        string
 	publicAPIURL        string
 	explorerURL         string
+	signer              signerclient.Config
 }
 
 func parseMonitorConfig() (monitorConfig, error) {
 	var missing []string
 
 	nodesStr := requireEnv("RPC_NODES", &missing)
-	apiURLsStr := requireEnv("LAYER_API_URLS", &missing)
+	apiURLsStr := requireEnv("API_URLS", &missing)
 
 	cfg := monitorConfig{
 		clickhouseHost:      requireEnv("CLICKHOUSE_HOST", &missing),
@@ -323,6 +357,13 @@ func parseMonitorConfig() (monitorConfig, error) {
 	cfg.publicRPCURL = firstPublicURL(nodesStr)
 	cfg.publicAPIURL = firstPublicURL(apiURLsStr)
 	cfg.explorerURL = os.Getenv("EXPLORER_URL")
+
+	// Remote signer connection (optional). When REMOTE_SIGNER_ADDR is set the
+	// monitor queries the signer for the reporter wallet address at startup;
+	// otherwise it relies on the address already stored in the DB.
+	cfg.signer = signerclient.Config{
+		Addr: os.Getenv("REMOTE_SIGNER_ADDR"),
+	}
 
 	if len(missing) > 0 {
 		return cfg, fmt.Errorf("missing required environment variables: %s", strings.Join(missing, ", "))

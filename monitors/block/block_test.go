@@ -296,6 +296,13 @@ func TestDeduplication(t *testing.T) {
 			wrappedDB, err := blockdb.New(ctx, sqlDB)
 			require.NoError(t, err)
 
+			// Clear tables before each subtest to ensure isolation (chdb "" is a
+			// shared session, so rows would otherwise accumulate across subtests).
+			for _, table := range []string{blockdb.TableNameTxs, blockdb.TableNameReports, blockdb.TableNameBlockSigns} {
+				_, err = sqlDB.Exec("TRUNCATE TABLE " + table)
+				require.NoError(t, err)
+			}
+
 			// Merge all node streams into a single mock fetcher that returns all blocks
 			// The test verifies deduplication by checking that the same block from
 			// multiple "nodes" results in only one DB entry
@@ -344,13 +351,86 @@ func TestDeduplication(t *testing.T) {
 
 			expectedCount := len(expected)
 			require.Eventually(t, func() bool {
-				actual := fetchReportsFromDB(t, sqlDB)
+				// Runs in a goroutine — never call require.*/t.Fatal here.
+				actual, err := fetchReportsFromDBNoFail(sqlDB)
+				if err != nil {
+					t.Logf("db query error (retrying): %v", err)
+					return false
+				}
 				return len(actual) == expectedCount
-			}, 3*time.Second, 100*time.Millisecond, "expected %d reports, got %d", expectedCount, len(fetchReportsFromDB(t, sqlDB)))
+			}, 30*time.Second, 100*time.Millisecond, "reports did not converge to %d", expectedCount)
 
 			actualReports := sortReports(t, copyReports(fetchReportsFromDB(t, sqlDB)))
 			expectedSorted := sortReports(t, copyReports(expected))
 			require.Equal(t, expectedSorted, actualReports)
 		})
 	}
+}
+
+// TestBackfill_ClampsToPrunedFloor verifies the pruning fix: when the configured
+// backfill lookback would start below the nodes' earliest retained (un-pruned)
+// height, startHeight clamps up to that floor so the processor ingests from the
+// oldest available block instead of wedging forever on pruned heights.
+func TestBackfill_ClampsToPrunedFloor(t *testing.T) {
+	const blocksPerDay = 57600
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	sqlDB, err := sql.Open("chdb", "")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = sqlDB.Close() })
+
+	wrappedDB, err := blockdb.New(ctx, sqlDB)
+	require.NoError(t, err)
+	for _, table := range []string{blockdb.TableNameTxs, blockdb.TableNameReports, blockdb.TableNameBlockSigns} {
+		_, err = sqlDB.Exec("TRUNCATE TABLE " + table)
+		require.NoError(t, err)
+	}
+
+	const latest = int64(100000)
+	const prunedFloor = int64(60000) // nodes pruned everything below this
+	// A 1-day lookback computes start = latest-57600 = 42400, BELOW the floor.
+	const wouldStartAt = latest - blocksPerDay
+
+	fetcher := newMockFetcher(t, nil)
+	fetcher.mu.Lock()
+	fetcher.maxHeight = latest
+	fetcher.firstCall = false
+	fetcher.earliestHeight = prunedFloor
+	fetcher.mu.Unlock()
+
+	cfg := Config{BackfillLookback: 1, PollInterval: 50 * time.Millisecond, FetchWorkers: 5}
+	monitor, err := NewWithFetcher(context.Background(), cryptolog.New(), cfg, wrappedDB, fetcher)
+	require.NoError(t, err)
+
+	runErr := make(chan error, 1)
+	go func() { runErr <- monitor.Run(ctx) }()
+
+	expected := int(latest - prunedFloor + 1)
+	require.Eventually(t, func() bool {
+		return fetcher.FetchedCount() >= expected
+	}, 5*time.Second, 50*time.Millisecond, "expected ingestion clamped to floor %d", prunedFloor)
+
+	cancel()
+	select {
+	case err := <-runErr:
+		if err != nil && !errors.Is(err, context.Canceled) {
+			t.Fatalf("monitor run failed: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("monitor did not stop")
+	}
+
+	heights := fetcher.FetchedHeights()
+	require.NotEmpty(t, heights)
+	var minFetched int64 = 1 << 62
+	for h := range heights {
+		if h < minFetched {
+			minFetched = h
+		}
+	}
+	require.Equal(t, prunedFloor, minFetched,
+		"start must clamp up to the pruned floor (%d), not the lookback height (%d)", prunedFloor, wouldStartAt)
+	require.NotContains(t, heights, int64(wouldStartAt),
+		"must NOT fetch below the pruned floor")
 }

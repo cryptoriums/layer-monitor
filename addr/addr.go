@@ -81,16 +81,16 @@ func FetchValcons(apiURLs []string, walletAddress string) string {
 		}
 
 		if resp.StatusCode != http.StatusOK {
-			resp.Body.Close()
+			_ = resp.Body.Close()
 			continue
 		}
 
 		var result stakingtypes.QueryValidatorsResponse
 		if err := cdc.UnmarshalJSON(readBody(resp), &result); err != nil {
-			resp.Body.Close()
+			_ = resp.Body.Close()
 			continue
 		}
-		resp.Body.Close()
+		_ = resp.Body.Close()
 
 		for _, v := range result.Validators {
 			if v.OperatorAddress == operatorAddr && v.ConsensusPubkey != nil {
@@ -155,7 +155,7 @@ func FetchChainID(apiURLs []string) string {
 		}
 
 		if resp.StatusCode != http.StatusOK {
-			resp.Body.Close()
+			_ = resp.Body.Close()
 			continue
 		}
 
@@ -165,10 +165,10 @@ func FetchChainID(apiURLs []string) string {
 			} `json:"default_node_info"`
 		}
 		if err := json.Unmarshal(readBody(resp), &result); err != nil {
-			resp.Body.Close()
+			_ = resp.Body.Close()
 			continue
 		}
-		resp.Body.Close()
+		_ = resp.Body.Close()
 
 		if result.DefaultNodeInfo.Network != "" {
 			return result.DefaultNodeInfo.Network

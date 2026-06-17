@@ -27,7 +27,6 @@ require (
 )
 
 require (
-	github.com/tellor-io/layer-daemons v0.2.0
 	cosmossdk.io/errors v1.0.2 // indirect
 	cosmossdk.io/math v1.5.3 // indirect
 	github.com/cosmos/gogoproto v1.7.0 // indirect
@@ -40,7 +39,7 @@ require (
 	github.com/spf13/viper v1.20.1 // indirect
 	golang.org/x/exp v0.0.0-20250305212735-054e65f0b394 // indirect
 	google.golang.org/genproto/googleapis/api v0.0.0-20250528174236-200df99c418a // indirect
-	google.golang.org/grpc v1.72.2 // indirect
+	google.golang.org/grpc v1.79.3
 )
 
 require (
@@ -106,7 +105,7 @@ require (
 	go.yaml.in/yaml/v3 v3.0.4 // indirect
 	golang.org/x/arch v0.15.0 // indirect
 	golang.org/x/text v0.32.0 // indirect
-	google.golang.org/protobuf v1.36.6 // indirect
+	google.golang.org/protobuf v1.36.11 // indirect
 	gopkg.in/yaml.v2 v2.4.0 // indirect
 )
 
@@ -163,7 +162,7 @@ require (
 	github.com/golang/groupcache v0.0.0-20210331224755-41bb18bfe9da // indirect
 	github.com/golang/snappy v0.0.5-0.20220116011046-fa5810519dcb // indirect
 	github.com/google/btree v1.1.3 // indirect
-	github.com/google/flatbuffers v1.12.1 // indirect
+	github.com/google/flatbuffers v2.0.8+incompatible // indirect
 	github.com/google/go-cmp v0.7.0 // indirect
 	github.com/google/orderedcode v0.0.1 // indirect
 	github.com/google/s2a-go v0.1.8 // indirect
@@ -243,7 +242,7 @@ require (
 	golang.org/x/time v0.9.0 // indirect
 	google.golang.org/api v0.215.0 // indirect
 	google.golang.org/genproto v0.0.0-20241118233622-e639e219e697 // indirect
-	google.golang.org/genproto/googleapis/rpc v0.0.0-20250528174236-200df99c418a // indirect
+	google.golang.org/genproto/googleapis/rpc v0.0.0-20251202230838-ff82c1b0f217 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 	gotest.tools/v3 v3.5.2 // indirect
 	nhooyr.io/websocket v1.8.10 // indirect
@@ -287,3 +286,11 @@ replace go.opentelemetry.io/otel/sdk => go.opentelemetry.io/otel/sdk v1.28.0
 replace go.opentelemetry.io/otel/sdk/metric => go.opentelemetry.io/otel/sdk/metric v1.28.0
 
 replace go.opentelemetry.io/auto/sdk => go.opentelemetry.io/auto/sdk v1.1.0
+
+require github.com/tellor-io/bridge-remote-signer/api v0.0.0
+
+replace github.com/tellor-io/bridge-remote-signer/api => ./vendor-api
+
+// Pin grpc to the version already used by this module so the bridge-remote-signer/api
+// dependency cannot upgrade it (which would pull in incompatible otel semconv versions).
+replace google.golang.org/grpc => google.golang.org/grpc v1.72.2

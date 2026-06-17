@@ -1,0 +1,446 @@
+[
+  {
+    "block": {
+      "header": {
+        "version": {},
+        "chain_id": "",
+        "height": 1000,
+        "time": "2023-11-14T22:13:20Z",
+        "last_block_id": {
+          "hash": "",
+          "parts": {
+            "total": 0,
+            "hash": ""
+          }
+        },
+        "last_commit_hash": "",
+        "data_hash": "",
+        "validators_hash": "",
+        "next_validators_hash": "",
+        "consensus_hash": "",
+        "app_hash": "",
+        "last_results_hash": "",
+        "evidence_hash": "",
+        "proposer_address": ""
+      },
+      "data": {
+        "txs": null
+      },
+      "evidence": {
+        "evidence": null
+      },
+      "last_commit": null
+    },
+    "block_id": {
+      "hash": "",
+      "parts": {
+        "total": 0,
+        "hash": ""
+      }
+    },
+    "result_finalize_block": {
+      "tx_results": [
+        {
+          "code": 0,
+          "data": null,
+          "log": "",
+          "info": "",
+          "gas_wanted": "0",
+          "gas_used": "0",
+          "events": [
+            {
+              "type": "new_report",
+              "attributes": [
+                {
+                  "key": "reporter",
+                  "value": "tellor1reporteraaa",
+                  "index": false
+                },
+                {
+                  "key": "power",
+                  "value": "10",
+                  "index": false
+                },
+                {
+                  "key": "query_type",
+                  "value": "SpotPrice",
+                  "index": false
+                },
+                {
+                  "key": "query_id",
+                  "value": "71756572792d4100000000000000000000000000000000000000000000000000",
+                  "index": false
+                },
+                {
+                  "key": "aggregate_method",
+                  "value": "weighted-median",
+                  "index": false
+                },
+                {
+                  "key": "value",
+                  "value": "00000000000000000000000000000000000000000000000000000000000003e8",
+                  "index": false
+                },
+                {
+                  "key": "timestamp",
+                  "value": "1700000000000",
+                  "index": false
+                },
+                {
+                  "key": "cyclelist",
+                  "value": "true",
+                  "index": false
+                },
+                {
+                  "key": "block_number",
+                  "value": "1000",
+                  "index": false
+                },
+                {
+                  "key": "meta_id",
+                  "value": "1000",
+                  "index": false
+                }
+              ]
+            }
+          ],
+          "codespace": ""
+        }
+      ],
+      "validator_updates": null
+    }
+  },
+  {
+    "block": {
+      "header": {
+        "version": {},
+        "chain_id": "",
+        "height": 1001,
+        "time": "2023-11-14T22:13:20Z",
+        "last_block_id": {
+          "hash": "",
+          "parts": {
+            "total": 0,
+            "hash": ""
+          }
+        },
+        "last_commit_hash": "",
+        "data_hash": "",
+        "validators_hash": "",
+        "next_validators_hash": "",
+        "consensus_hash": "",
+        "app_hash": "",
+        "last_results_hash": "",
+        "evidence_hash": "",
+        "proposer_address": ""
+      },
+      "data": {
+        "txs": null
+      },
+      "evidence": {
+        "evidence": null
+      },
+      "last_commit": null
+    },
+    "block_id": {
+      "hash": "",
+      "parts": {
+        "total": 0,
+        "hash": ""
+      }
+    },
+    "result_finalize_block": {
+      "tx_results": [
+        {
+          "code": 0,
+          "data": null,
+          "log": "",
+          "info": "",
+          "gas_wanted": "0",
+          "gas_used": "0",
+          "events": [
+            {
+              "type": "new_report",
+              "attributes": [
+                {
+                  "key": "reporter",
+                  "value": "tellor1reporterbbb",
+                  "index": false
+                },
+                {
+                  "key": "power",
+                  "value": "10",
+                  "index": false
+                },
+                {
+                  "key": "query_type",
+                  "value": "SpotPrice",
+                  "index": false
+                },
+                {
+                  "key": "query_id",
+                  "value": "71756572792d4200000000000000000000000000000000000000000000000000",
+                  "index": false
+                },
+                {
+                  "key": "aggregate_method",
+                  "value": "weighted-median",
+                  "index": false
+                },
+                {
+                  "key": "value",
+                  "value": "00000000000000000000000000000000000000000000000000000000000003e9",
+                  "index": false
+                },
+                {
+                  "key": "timestamp",
+                  "value": "1700000000000",
+                  "index": false
+                },
+                {
+                  "key": "cyclelist",
+                  "value": "true",
+                  "index": false
+                },
+                {
+                  "key": "block_number",
+                  "value": "1001",
+                  "index": false
+                },
+                {
+                  "key": "meta_id",
+                  "value": "1001",
+                  "index": false
+                }
+              ]
+            }
+          ],
+          "codespace": ""
+        }
+      ],
+      "validator_updates": null
+    }
+  },
+  {
+    "block": {
+      "header": {
+        "version": {},
+        "chain_id": "",
+        "height": 1002,
+        "time": "2023-11-14T22:13:20Z",
+        "last_block_id": {
+          "hash": "",
+          "parts": {
+            "total": 0,
+            "hash": ""
+          }
+        },
+        "last_commit_hash": "",
+        "data_hash": "",
+        "validators_hash": "",
+        "next_validators_hash": "",
+        "consensus_hash": "",
+        "app_hash": "",
+        "last_results_hash": "",
+        "evidence_hash": "",
+        "proposer_address": ""
+      },
+      "data": {
+        "txs": null
+      },
+      "evidence": {
+        "evidence": null
+      },
+      "last_commit": null
+    },
+    "block_id": {
+      "hash": "",
+      "parts": {
+        "total": 0,
+        "hash": ""
+      }
+    },
+    "result_finalize_block": {
+      "tx_results": [
+        {
+          "code": 0,
+          "data": null,
+          "log": "",
+          "info": "",
+          "gas_wanted": "0",
+          "gas_used": "0",
+          "events": [
+            {
+              "type": "new_report",
+              "attributes": [
+                {
+                  "key": "reporter",
+                  "value": "tellor1reporterccc",
+                  "index": false
+                },
+                {
+                  "key": "power",
+                  "value": "10",
+                  "index": false
+                },
+                {
+                  "key": "query_type",
+                  "value": "SpotPrice",
+                  "index": false
+                },
+                {
+                  "key": "query_id",
+                  "value": "71756572792d4300000000000000000000000000000000000000000000000000",
+                  "index": false
+                },
+                {
+                  "key": "aggregate_method",
+                  "value": "weighted-median",
+                  "index": false
+                },
+                {
+                  "key": "value",
+                  "value": "00000000000000000000000000000000000000000000000000000000000003ea",
+                  "index": false
+                },
+                {
+                  "key": "timestamp",
+                  "value": "1700000000000",
+                  "index": false
+                },
+                {
+                  "key": "cyclelist",
+                  "value": "true",
+                  "index": false
+                },
+                {
+                  "key": "block_number",
+                  "value": "1002",
+                  "index": false
+                },
+                {
+                  "key": "meta_id",
+                  "value": "1002",
+                  "index": false
+                }
+              ]
+            }
+          ],
+          "codespace": ""
+        }
+      ],
+      "validator_updates": null
+    }
+  },
+  {
+    "block": {
+      "header": {
+        "version": {},
+        "chain_id": "",
+        "height": 1003,
+        "time": "2023-11-14T22:13:20Z",
+        "last_block_id": {
+          "hash": "",
+          "parts": {
+            "total": 0,
+            "hash": ""
+          }
+        },
+        "last_commit_hash": "",
+        "data_hash": "",
+        "validators_hash": "",
+        "next_validators_hash": "",
+        "consensus_hash": "",
+        "app_hash": "",
+        "last_results_hash": "",
+        "evidence_hash": "",
+        "proposer_address": ""
+      },
+      "data": {
+        "txs": null
+      },
+      "evidence": {
+        "evidence": null
+      },
+      "last_commit": null
+    },
+    "block_id": {
+      "hash": "",
+      "parts": {
+        "total": 0,
+        "hash": ""
+      }
+    },
+    "result_finalize_block": {
+      "tx_results": [
+        {
+          "code": 0,
+          "data": null,
+          "log": "",
+          "info": "",
+          "gas_wanted": "0",
+          "gas_used": "0",
+          "events": [
+            {
+              "type": "new_report",
+              "attributes": [
+                {
+                  "key": "reporter",
+                  "value": "tellor1reporterddd",
+                  "index": false
+                },
+                {
+                  "key": "power",
+                  "value": "10",
+                  "index": false
+                },
+                {
+                  "key": "query_type",
+                  "value": "SpotPrice",
+                  "index": false
+                },
+                {
+                  "key": "query_id",
+                  "value": "71756572792d4400000000000000000000000000000000000000000000000000",
+                  "index": false
+                },
+                {
+                  "key": "aggregate_method",
+                  "value": "weighted-median",
+                  "index": false
+                },
+                {
+                  "key": "value",
+                  "value": "00000000000000000000000000000000000000000000000000000000000003eb",
+                  "index": false
+                },
+                {
+                  "key": "timestamp",
+                  "value": "1700000000000",
+                  "index": false
+                },
+                {
+                  "key": "cyclelist",
+                  "value": "true",
+                  "index": false
+                },
+                {
+                  "key": "block_number",
+                  "value": "1003",
+                  "index": false
+                },
+                {
+                  "key": "meta_id",
+                  "value": "1003",
+                  "index": false
+                }
+              ]
+            }
+          ],
+          "codespace": ""
+        }
+      ],
+      "validator_updates": null
+    }
+  }
+]

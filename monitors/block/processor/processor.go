@@ -2,9 +2,7 @@ package processor
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"strconv"
 	"strings"
@@ -13,9 +11,11 @@ import (
 
 	abci "github.com/cometbft/cometbft/abci/types"
 	ctypes "github.com/cometbft/cometbft/types"
-	"github.com/shopspring/decimal"
-	monitor "github.com/cryptoriums/layer-monitor/metrics"
 	blockdb "github.com/cryptoriums/layer-monitor/db"
+	monitor "github.com/cryptoriums/layer-monitor/metrics"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promauto"
+	"github.com/shopspring/decimal"
 	"github.com/tellor-io/layer/x/oracle/types"
 
 	"cosmossdk.io/log"
@@ -122,6 +122,7 @@ type ProcessorConfig struct {
 	WalletAddress             string   // Our wallet address (tellor1xxx) for reporter "our" metric labels
 	ValidatorConsensusAddress string   // Our validator consensus address (tellorvalcons) for validator "our" metric labels
 	LayerAPIURLs              []string // Layer API URLs for fetching reporters at startup
+	Registerer                prometheus.Registerer
 }
 
 type Processor struct {
@@ -166,6 +167,12 @@ type Processor struct {
 	// Batch insert buffer for cycle rotations.
 	cycleRotationBuffer []bufferedCycleRotation
 	cycleRotationMtx    sync.Mutex
+
+	// The only two metrics this processor exposes, both for our own node:
+	//   missedBlocks  — block signatures our validator missed (counted even while jailed/out-of-set)
+	//   missedReports — reporter cycles our reporter missed
+	missedBlocks  prometheus.Counter
+	missedReports prometheus.Counter
 }
 
 func New(
@@ -195,9 +202,26 @@ func NewWithConfig(
 		knownReporters:          make(map[string]struct{}),
 		reportersInCurrentCycle: make(map[string]struct{}),
 	}
-	if len(cfg.LayerAPIURLs) > 0 {
-		go p.fetchReportersWithRetry(ctx)
+	if cfg.Registerer == nil {
+		// Use an isolated registry by default to avoid duplicate registration
+		// when multiple processors are created in tests.
+		cfg.Registerer = prometheus.NewRegistry()
 	}
+	p.missedBlocks = promauto.With(cfg.Registerer).NewCounter(prometheus.CounterOpts{
+		Namespace: monitor.MetricsNamespace,
+		Subsystem: "processor",
+		Name:      "missed_our_validator_blocks_total",
+		Help:      "Total block signatures our validator missed (counted even while jailed/out-of-set)",
+	})
+	p.missedReports = promauto.With(cfg.Registerer).NewCounter(prometheus.CounterOpts{
+		Namespace: monitor.MetricsNamespace,
+		Subsystem: "processor",
+		Name:      "missed_our_reporter_cycles_total",
+		Help:      "Total reporter cycles our reporter missed",
+	})
+	// Do not pre-seed knownReporters from the API: jailed/inactive reporters
+	// that never submit would be counted as missing every cycle, inflating the
+	// network miss rate. Build the list incrementally from actual reports only.
 	return p
 }
 
@@ -239,19 +263,17 @@ func (p *Processor) handleCycleRotation(ctx context.Context, height int64, block
 	// New cycle detected - record to DB
 	p.recordCycleRotation(ctx, height, blockTime, newQueryID)
 
-	// Log if our reporter missed submitting in the previous cycle
-	if p.cfg.WalletAddress != "" {
-		_, submitted := p.reportersInCurrentCycle[p.cfg.WalletAddress]
-		if !submitted && len(p.knownReporters) > 0 {
-			// Only warn if our reporter is known (has submitted before)
-			if _, known := p.knownReporters[p.cfg.WalletAddress]; known {
-				p.logger.Warn("our reporter missed submitting report in cycle",
-					"height", height,
-					"missed_query_id", p.currentCycleQueryID,
-					"new_query_id", newQueryID,
-					"reporter", p.cfg.WalletAddress,
-				)
-			}
+	// Count a missed report if our reporter did not submit in the cycle that just
+	// completed. WalletAddress is guaranteed non-empty (validated at startup).
+	if _, submitted := p.reportersInCurrentCycle[p.cfg.WalletAddress]; !submitted {
+		if _, known := p.knownReporters[p.cfg.WalletAddress]; known {
+			p.missedReports.Inc()
+			p.logger.Warn("our reporter missed submitting report in cycle",
+				"height", height,
+				"missed_query_id", p.currentCycleQueryID,
+				"new_query_id", newQueryID,
+				"reporter", p.cfg.WalletAddress,
+			)
 		}
 	}
 
@@ -279,102 +301,6 @@ func (p *Processor) markReporterReportedInCycle(reporter string) {
 	defer p.cycleMtx.Unlock()
 	p.knownReporters[reporter] = struct{}{}
 	p.reportersInCurrentCycle[reporter] = struct{}{}
-}
-
-// Reporter fetch configuration.
-const (
-	reporterFetchMaxRetries = 3
-	reporterFetchRetryDelay = 10 * time.Second
-	reporterFetchTimeout    = 15 * time.Second
-)
-
-// fetchReportersWithRetry fetches reporters with retries, respecting context cancellation.
-func (p *Processor) fetchReportersWithRetry(ctx context.Context) {
-	for attempt := 1; attempt <= reporterFetchMaxRetries; attempt++ {
-		select {
-		case <-ctx.Done():
-			p.logger.Debug("reporter fetch canceled")
-			return
-		default:
-		}
-
-		if p.fetchReportersFromAPI(ctx) {
-			return
-		}
-
-		if attempt < reporterFetchMaxRetries {
-			p.logger.Warn("retrying reporters fetch", "attempt", attempt, "next_retry_in", reporterFetchRetryDelay)
-			select {
-			case <-ctx.Done():
-				p.logger.Debug("reporter fetch canceled during retry wait")
-				return
-			case <-time.After(reporterFetchRetryDelay):
-			}
-		}
-	}
-	p.logger.Error("failed to fetch reporters after retries - will build list incrementally from reports")
-}
-
-// fetchReportersFromAPI fetches reporters from API and returns true on success.
-func (p *Processor) fetchReportersFromAPI(ctx context.Context) bool {
-	ctx, cancel := context.WithTimeout(ctx, reporterFetchTimeout)
-	defer cancel()
-
-	for _, baseURL := range p.cfg.LayerAPIURLs {
-		url := fmt.Sprintf("%s/tellor-io/layer/reporter/reporters?pagination.limit=500", baseURL)
-
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
-		if err != nil {
-			p.logger.Debug("failed to create reporters request", "error", err, "url", url)
-			continue
-		}
-
-		resp, err := p.httpClient.Do(req)
-		if err != nil {
-			p.logger.Debug("failed to fetch reporters", "error", err, "url", url)
-			continue
-		}
-
-		body, err := io.ReadAll(resp.Body)
-		resp.Body.Close()
-		if err != nil {
-			p.logger.Debug("failed to read reporters response", "error", err)
-			continue
-		}
-
-		if resp.StatusCode != http.StatusOK {
-			p.logger.Debug("reporters request failed", "status", resp.StatusCode, "url", url)
-			continue
-		}
-
-		var result struct {
-			Reporters []struct {
-				Address string `json:"address"`
-			} `json:"reporters"`
-		}
-		if err := json.Unmarshal(body, &result); err != nil {
-			p.logger.Debug("failed to parse reporters response", "error", err)
-			continue
-		}
-
-		if len(result.Reporters) == 0 {
-			continue
-		}
-
-		p.cycleMtx.Lock()
-		for _, r := range result.Reporters {
-			if r.Address != "" {
-				p.knownReporters[r.Address] = struct{}{}
-			}
-		}
-		count := len(p.knownReporters)
-		p.cycleMtx.Unlock()
-
-		p.logger.Info("initialized known reporters from API", "count", count)
-		return true
-	}
-
-	return false
 }
 
 const processedHeightsLimit = 1000
@@ -1038,7 +964,7 @@ func (p *Processor) insertBlockSigns(blockEv ctypes.EventDataNewBlock) {
 	// The signatures are for block at height-1
 	commitHeight := currentHeight - 1
 	blockTime := blockEv.Block.Time
-
+	ourValidatorSeen := false
 	for _, sig := range blockEv.Block.LastCommit.Signatures {
 		// Skip empty signatures (validator not in set at that height)
 		if len(sig.ValidatorAddress) == 0 {
@@ -1059,9 +985,13 @@ func (p *Processor) insertBlockSigns(blockEv ctypes.EventDataNewBlock) {
 		// Convert to bech32 consensus address format
 		validatorAddr := sdk.ConsAddress(sig.ValidatorAddress).String()
 
-		// Log warning if our validator missed signing
-		if signed == 0 && p.cfg.ValidatorConsensusAddress != "" && validatorAddr == p.cfg.ValidatorConsensusAddress {
-			p.logger.Warn("our validator missed signing block", "height", commitHeight, "validator", validatorAddr)
+		// Track our validator's presence and log a warning if it missed signing.
+		if validatorAddr == p.cfg.ValidatorConsensusAddress {
+			ourValidatorSeen = true
+			if signed == 0 {
+				p.missedBlocks.Inc()
+				p.logger.Warn("our validator missed signing block", "height", commitHeight, "validator", validatorAddr)
+			}
 		}
 
 		p.blockSignMtx.Lock()
@@ -1070,6 +1000,24 @@ func (p *Processor) insertBlockSigns(blockEv ctypes.EventDataNewBlock) {
 			blockTime:   blockTime,
 			validator:   validatorAddr,
 			signed:      signed,
+		})
+		p.blockSignMtx.Unlock()
+	}
+
+	// Count actual missed blocks regardless of validator status: when our validator
+	// is jailed/unbonded it is absent from the commit entirely, so the loop above
+	// never records it. Record those as missed (signed = 0) so missed_blocks reflects
+	// reality even while it is out of the active set.
+	if p.cfg.ValidatorConsensusAddress != "" && !ourValidatorSeen {
+		p.missedBlocks.Inc()
+		p.logger.Warn("our validator absent from commit (jailed/out-of-set) — counted as missed",
+			"height", commitHeight, "validator", p.cfg.ValidatorConsensusAddress)
+		p.blockSignMtx.Lock()
+		p.blockSignBuffer = append(p.blockSignBuffer, bufferedBlockSign{
+			blockHeight: commitHeight,
+			blockTime:   blockTime,
+			validator:   p.cfg.ValidatorConsensusAddress,
+			signed:      0,
 		})
 		p.blockSignMtx.Unlock()
 	}

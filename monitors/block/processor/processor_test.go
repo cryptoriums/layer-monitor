@@ -62,7 +62,7 @@ func fetchBlockSigns(t *testing.T, db blockdb.SQLDB) []blockSignRecord {
 		blockdb.ColBlockHeight, blockdb.ColValidatorAddress, blockdb.ColSigned,
 		blockdb.TableNameBlockSigns, blockdb.ColBlockHeight, blockdb.ColValidatorAddress))
 	require.NoError(t, err)
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var records []blockSignRecord
 	for rows.Next() {
@@ -95,7 +95,7 @@ func fetchReports(t *testing.T, db blockdb.SQLDB) []reportRecord {
 		blockdb.ColReporter, blockdb.ColPower, blockdb.ColQueryType, blockdb.ColQueryID, blockdb.ColBlockNumber, blockdb.ColMetaID, blockdb.ColCyclelist,
 		blockdb.TableNameReports, blockdb.ColBlockNumber))
 	require.NoError(t, err)
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var records []reportRecord
 	for rows.Next() {
@@ -127,7 +127,7 @@ func fetchRewards(t *testing.T, db blockdb.SQLDB) []rewardRecord {
 		blockdb.ColBlockHeight, blockdb.ColBlockTime, blockdb.ColSender, blockdb.ColRecipient, blockdb.ColAmount, blockdb.ColType,
 		blockdb.TableNameRewards, blockdb.ColBlockHeight, blockdb.ColType, blockdb.ColRecipient))
 	require.NoError(t, err)
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var records []rewardRecord
 	for rows.Next() {
@@ -149,7 +149,7 @@ func fetchRewardsByType(t *testing.T, db blockdb.SQLDB, rewardType string) []rew
 		blockdb.ColBlockHeight, blockdb.ColBlockTime, blockdb.ColSender, blockdb.ColRecipient, blockdb.ColAmount, blockdb.ColType,
 		blockdb.TableNameRewards, blockdb.ColType, blockdb.ColBlockHeight, blockdb.ColRecipient), rewardType)
 	require.NoError(t, err)
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var records []rewardRecord
 	for rows.Next() {
@@ -1121,7 +1121,7 @@ func fetchCycleRotations(t *testing.T, db blockdb.SQLDB) []cycleRotationRecord {
 		blockdb.ColBlockHeight, blockdb.ColQueryID, blockdb.ColTimestamp,
 		blockdb.TableNameCycleRotations, blockdb.ColBlockHeight))
 	require.NoError(t, err)
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var records []cycleRotationRecord
 	for rows.Next() {
@@ -1361,7 +1361,7 @@ func fetchDisputes(t *testing.T, db blockdb.SQLDB) []disputeRecord {
 		blockdb.TableNameDisputes, blockdb.ColDisputeID,
 	))
 	require.NoError(t, err)
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var records []disputeRecord
 	for rows.Next() {
