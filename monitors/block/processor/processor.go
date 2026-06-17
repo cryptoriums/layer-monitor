@@ -986,7 +986,7 @@ func (p *Processor) insertBlockSigns(blockEv ctypes.EventDataNewBlock) {
 		validatorAddr := sdk.ConsAddress(sig.ValidatorAddress).String()
 
 		// Track our validator's presence and log a warning if it missed signing.
-		if p.cfg.ValidatorConsensusAddress != "" && validatorAddr == p.cfg.ValidatorConsensusAddress {
+		if validatorAddr == p.cfg.ValidatorConsensusAddress {
 			ourValidatorSeen = true
 			if signed == 0 {
 				p.missedBlocks.Inc()

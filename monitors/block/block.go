@@ -69,6 +69,11 @@ type rpcFetcher struct {
 
 // New creates a new RPC monitor.
 func New(ctx context.Context, logger log.Logger, cfg Config, db db.Db) (*Monitor, error) {
+	// ValidatorConsensusAddress must never be empty — refuse to start without it
+	// so validator metrics/alerts can't silently no-op.
+	if cfg.ValidatorConsensusAddress == "" {
+		return nil, errors.New("ValidatorConsensusAddress must not be empty")
+	}
 	if cfg.PollInterval <= 0 {
 		cfg.PollInterval = 800 * time.Millisecond
 	}
@@ -135,11 +140,11 @@ func (m *Monitor) Run(ctx context.Context) error {
 		}
 		if lastProcessed >= nextHeight {
 			nextHeight = lastProcessed + 1
-		} else if err != nil {
-			// No progress and an error: the nodes may have pruned past our
-			// cursor (every block from nextHeight up is gone). Re-check the
-			// earliest available height and skip the unavailable gap so we don't
-			// retry pruned blocks forever.
+		}
+		// No progress and an error: the nodes may have pruned past our cursor
+		// (every block from nextHeight up is gone). Re-check the earliest available
+		// height and skip the unavailable gap so we don't retry pruned blocks forever.
+		if lastProcessed < nextHeight && err != nil {
 			if earliest, eErr := m.fetcher.EarliestHeight(ctx); eErr == nil && earliest > nextHeight {
 				m.logger.Warn("skipping pruned gap; advancing to earliest available height",
 					"from", nextHeight, "to", earliest)

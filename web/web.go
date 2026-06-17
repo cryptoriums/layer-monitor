@@ -62,9 +62,9 @@ type Config struct {
 	TLSEmail    string `yaml:"tls_email"`     // Email for Let's Encrypt notifications
 	TLSCacheDir string `yaml:"tls_cache_dir"` // Directory to cache certificates (default: ./certs)
 
-	// Prometheus registry shared with jail/domain monitors so their metrics appear on /metrics
-	Registry   prometheus.Gatherer
-	Registerer prometheus.Registerer
+	// Prometheus gatherer shared with jail/domain monitors so their metrics appear
+	// on /metrics. The status page itself reads only from the DB, never Prometheus.
+	Registry prometheus.Gatherer
 }
 
 type Server struct {
@@ -125,9 +125,6 @@ func New(logger log.Logger, cfg Config, db blockdb.Db) (*Server, error) {
 
 	if cfg.Registry == nil {
 		cfg.Registry = prometheus.DefaultGatherer
-	}
-	if cfg.Registerer == nil {
-		cfg.Registerer = prometheus.DefaultRegisterer
 	}
 
 	s := &Server{

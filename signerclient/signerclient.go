@@ -1,10 +1,11 @@
-// Package signerclient is a thin mTLS gRPC client for the bridge remote signer.
+// Package signerclient is a thin gRPC client for the bridge remote signer.
 //
 // The monitor uses it at startup to discover the reporter's wallet address
 // (and, optionally, the chain ID) directly from the signer, so the address no
-// longer has to be hand-maintained in the monitor's own config. If the signer
-// is unreachable the caller is expected to fall back to the value already
-// stored in the database — see cmd/main.go.
+// longer has to be hand-maintained in the monitor's own config. It only calls
+// read-only endpoints (GetAddress, GetChainID), so it connects insecurely — no
+// mTLS required. If the signer is unreachable the caller is expected to fall
+// back to the value already stored in the database — see cmd/main.go.
 package signerclient
 
 import (
@@ -13,14 +14,9 @@ import (
 	"time"
 
 	signerv1 "github.com/tellor-io/bridge-remote-signer/api/gen/signer/v1"
-	bridgetls "github.com/tellor-io/bridge-remote-signer/api/tls"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 )
-
-// serverName must match the CN in the signer's server certificate. It is the
-// same value the reporter uses when dialing the signer.
-const serverName = "bridge-signer"
 
 // addressPrefix is the bech32 human-readable part for Layer accounts.
 const addressPrefix = "tellor"
@@ -29,11 +25,6 @@ const addressPrefix = "tellor"
 type Config struct {
 	// Addr is the signer's gRPC address (host:port).
 	Addr string
-	// CACert, ClientCert, ClientKey are PEM file paths for mTLS. When all three
-	// are empty the connection falls back to insecure (local/test use only).
-	CACert     string
-	ClientCert string
-	ClientKey  string
 }
 
 // Enabled reports whether a signer address is configured. When false the
@@ -46,20 +37,11 @@ type Client struct {
 	signer signerv1.BridgeSignerClient
 }
 
-// Dial connects to the remote signer. The returned Client must be Closed.
+// Dial connects to the remote signer over an insecure connection. The monitor
+// only calls read-only endpoints (GetAddress, GetChainID), which need no mTLS.
+// The returned Client must be Closed.
 func Dial(cfg Config) (*Client, error) {
-	var dialOpt grpc.DialOption
-	if cfg.CACert != "" && cfg.ClientCert != "" && cfg.ClientKey != "" {
-		creds, err := bridgetls.NewClientCredentials(cfg.CACert, cfg.ClientCert, cfg.ClientKey, serverName)
-		if err != nil {
-			return nil, fmt.Errorf("load mTLS credentials: %w", err)
-		}
-		dialOpt = grpc.WithTransportCredentials(creds)
-	} else {
-		dialOpt = grpc.WithTransportCredentials(insecure.NewCredentials())
-	}
-
-	conn, err := grpc.NewClient(cfg.Addr, dialOpt)
+	conn, err := grpc.NewClient(cfg.Addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	if err != nil {
 		return nil, fmt.Errorf("dial remote signer at %s: %w", cfg.Addr, err)
 	}

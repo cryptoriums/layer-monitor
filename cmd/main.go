@@ -228,7 +228,6 @@ func runMonitor(cmd *cobra.Command, _ []string) {
 		TLSEmail:           getEnv("TLS_EMAIL", ""),
 		TLSCacheDir:        "/app/certs",
 		Registry:           reg,
-		Registerer:         reg,
 	}
 	webServer, err := web.New(logger, webCfg, database)
 	if err != nil {
@@ -363,10 +362,7 @@ func parseMonitorConfig() (monitorConfig, error) {
 	// monitor queries the signer for the reporter wallet address at startup;
 	// otherwise it relies on the address already stored in the DB.
 	cfg.signer = signerclient.Config{
-		Addr:       os.Getenv("REMOTE_SIGNER_ADDR"),
-		CACert:     getEnv("REMOTE_SIGNER_CA_CERT", "/mtls/ca.crt"),
-		ClientCert: getEnv("REMOTE_SIGNER_CLIENT_CERT", "/mtls/client.crt"),
-		ClientKey:  getEnv("REMOTE_SIGNER_CLIENT_KEY", "/mtls/client.key"),
+		Addr: os.Getenv("REMOTE_SIGNER_ADDR"),
 	}
 
 	if len(missing) > 0 {
