@@ -1849,24 +1849,23 @@ func (s *Server) getMissedBlocksPerValidatorFromDB(ctx context.Context, periodDa
 		s.logger.Debug("failed to query total blocks", "error", err)
 	}
 
+	// Missed blocks = blocks where this validator did not sign (signed = 0). The
+	// processor records a block_signs row for every validator on every block
+	// (signed 1 or 0), so counting signed=0 rows directly is correct; subtracting
+	// the row count from the total would always yield ~0.
 	query := fmt.Sprintf(`
 		SELECT
 			%s,
-			(
-				SELECT COUNT(DISTINCT %s)
-				FROM %s
-				WHERE %s >= now() - INTERVAL %d DAY
-			) - COUNT(*) AS missed_blocks
+			COUNT(DISTINCT %s) AS missed_blocks
 		FROM %s
-		WHERE %s >= now() - INTERVAL %d DAY
+		WHERE %s >= now() - INTERVAL %d DAY AND %s = 0
 		GROUP BY %s
 		HAVING missed_blocks > 0
 	`,
 		blockdb.ColValidatorAddress,
 		blockdb.ColBlockHeight,
-		blockdb.TableNameBlockSigns, blockdb.ColBlockTimestamp, periodDays,
 		blockdb.TableNameBlockSigns,
-		blockdb.ColBlockTimestamp, periodDays,
+		blockdb.ColBlockTimestamp, periodDays, blockdb.ColSigned,
 		blockdb.ColValidatorAddress,
 	)
 
