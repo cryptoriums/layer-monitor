@@ -7,6 +7,9 @@ FROM golang:1.23-bookworm AS builder
 WORKDIR /src/layer-monitor
 
 COPY go.mod go.sum ./
+# vendor-api is a local replace target (bridge-remote-signer/api) and must be
+# present before `go mod download` so the relative replace resolves.
+COPY vendor-api ./vendor-api
 
 ENV GOTOOLCHAIN=auto
 
