@@ -1822,18 +1822,25 @@ func (s *Server) getMissedCyclesPerReporterFromDBForPeriod(ctx context.Context, 
 // getMissedBlocksPerValidatorFromDB queries missed blocks from DB for all validators (lookback period).
 // Returns a map of validator consensus address -> missed blocks count.
 //
-// CometBFT does not include the ValidatorAddress for absent validators in LastCommit.Signatures,
-// so the processor never inserts signed=0 rows. Instead we calculate:
+// A block counts as missed whenever the validator did not sign it — INCLUDING
+// blocks where it was jailed or otherwise out of the active set (it produces no
+// block_signs row then). We therefore compute:
 //
-//	missed = total_distinct_blocks_in_range - blocks_signed_by_validator
+//	missed = total_distinct_blocks_in_range - distinct_blocks_the_validator_signed
 //
-// This correctly counts all absences (validator not present in any commit) as missed.
+// This counts every non-signed block uniformly for all validators (no special
+// case), and captures jailed/out-of-set periods that signed=0 rows alone miss.
 // Also returns the total distinct blocks seen in the lookback period (used to
 // compute miss percentage on the status page).
+//
+// Note: a validator that was jailed/absent for the ENTIRE period has no rows at
+// all, so it does not appear here; the caller treats a missing entry as 0. That
+// only affects validators with zero activity in the whole window.
 func (s *Server) getMissedBlocksPerValidatorFromDB(ctx context.Context, periodDays int) (map[string]int64, int64) {
 	result := make(map[string]int64)
 
-	// Total distinct blocks in lookback period - used as denominator for miss%.
+	// Total distinct blocks in lookback period - used as the denominator and as
+	// the baseline every validator is expected to have signed.
 	totalQuery := fmt.Sprintf(`
 		SELECT COUNT(DISTINCT %s)
 		FROM %s
@@ -1848,19 +1855,19 @@ func (s *Server) getMissedBlocksPerValidatorFromDB(ctx context.Context, periodDa
 	} else {
 		s.logger.Debug("failed to query total blocks", "error", err)
 	}
+	if totalBlocks == 0 {
+		return result, 0
+	}
 
-	// Missed blocks = blocks where this validator did not sign (signed = 0). The
-	// processor records a block_signs row for every validator on every block
-	// (signed 1 or 0), so counting signed=0 rows directly is correct; subtracting
-	// the row count from the total would always yield ~0.
+	// Count the distinct blocks each validator actually signed (signed = 1).
+	// missed = total - signed, so jailed/out-of-set blocks (no row) count as missed.
 	query := fmt.Sprintf(`
 		SELECT
 			%s,
-			COUNT(DISTINCT %s) AS missed_blocks
+			COUNT(DISTINCT %s) AS signed_blocks
 		FROM %s
-		WHERE %s >= now() - INTERVAL %d DAY AND %s = 0
+		WHERE %s >= now() - INTERVAL %d DAY AND %s = 1
 		GROUP BY %s
-		HAVING missed_blocks > 0
 	`,
 		blockdb.ColValidatorAddress,
 		blockdb.ColBlockHeight,
@@ -1878,11 +1885,15 @@ func (s *Server) getMissedBlocksPerValidatorFromDB(ctx context.Context, periodDa
 
 	for rows.Next() {
 		var validatorAddr string
-		var missedBlocks int64
-		if err := rows.Scan(&validatorAddr, &missedBlocks); err != nil {
+		var signedBlocks int64
+		if err := rows.Scan(&validatorAddr, &signedBlocks); err != nil {
 			continue
 		}
-		result[validatorAddr] = missedBlocks
+		missed := totalBlocks - signedBlocks
+		if missed < 0 {
+			missed = 0
+		}
+		result[validatorAddr] = missed
 	}
 
 	return result, totalBlocks
