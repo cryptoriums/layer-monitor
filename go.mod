@@ -22,6 +22,7 @@ require (
 	github.com/spf13/cobra v1.9.1
 	github.com/strangelove-ventures/globalfee v0.50.1
 	github.com/stretchr/testify v1.11.1
+	github.com/tellor-io/bridge-remote-signer/api v0.0.0-20260625110956-a0eb13ebf52a
 	github.com/tellor-io/layer v0.0.0-20260102193944-693854ff6bff
 	golang.org/x/sync v0.19.0
 )
@@ -286,10 +287,6 @@ replace go.opentelemetry.io/otel/sdk => go.opentelemetry.io/otel/sdk v1.28.0
 replace go.opentelemetry.io/otel/sdk/metric => go.opentelemetry.io/otel/sdk/metric v1.28.0
 
 replace go.opentelemetry.io/auto/sdk => go.opentelemetry.io/auto/sdk v1.1.0
-
-require github.com/tellor-io/bridge-remote-signer/api v0.0.0
-
-replace github.com/tellor-io/bridge-remote-signer/api => ./vendor-api
 
 // Pin grpc to the version already used by this module so the bridge-remote-signer/api
 // dependency cannot upgrade it (which would pull in incompatible otel semconv versions).

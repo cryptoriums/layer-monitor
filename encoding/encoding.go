@@ -11,7 +11,6 @@ import (
 	ibctm "github.com/cosmos/ibc-go/v8/modules/light-clients/07-tendermint"
 	"github.com/strangelove-ventures/globalfee/x/globalfee"
 	bridgemodule "github.com/tellor-io/layer/x/bridge"
-	disputemodule "github.com/tellor-io/layer/x/dispute"
 	mintmodule "github.com/tellor-io/layer/x/mint"
 	oraclemodule "github.com/tellor-io/layer/x/oracle"
 	registrymodule "github.com/tellor-io/layer/x/registry/module"
@@ -84,7 +83,6 @@ func ensureInitialized() {
 			mintmodule.AppModuleBasic{},
 			oraclemodule.AppModuleBasic{},
 			registrymodule.AppModuleBasic{},
-			disputemodule.AppModuleBasic{},
 			bridgemodule.AppModuleBasic{},
 			reportermodule.AppModuleBasic{},
 			globalfee.AppModuleBasic{},

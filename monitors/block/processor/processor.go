@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"net/http"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -46,8 +45,6 @@ const (
 	AttrKeyCyclelist   = "cyclelist"
 	AttrKeyBlockNumber = "block_number"
 	AttrKeyMetaID      = "meta_id"
-	AttrKeyDisputeID   = "dispute_id"
-	AttrKeyDisputer    = "disputer"
 	AttrKeyValidator   = "validator"
 	AttrKeyAmount      = "amount"
 	AttrKeyDelegator   = "delegator"
@@ -169,7 +166,7 @@ type Processor struct {
 	cycleRotationMtx    sync.Mutex
 
 	// The only two metrics this processor exposes, both for our own node:
-	//   missedBlocks  — block signatures our validator missed (counted even while jailed/out-of-set)
+	//   missedBlocks  — block signatures our validator missed while in the active set
 	//   missedReports — reporter cycles our reporter missed
 	missedBlocks  prometheus.Counter
 	missedReports prometheus.Counter
@@ -211,7 +208,7 @@ func NewWithConfig(
 		Namespace: monitor.MetricsNamespace,
 		Subsystem: "processor",
 		Name:      "missed_our_validator_blocks_total",
-		Help:      "Total block signatures our validator missed (counted even while jailed/out-of-set)",
+		Help:      "Total block signatures our validator missed while in the active set",
 	})
 	p.missedReports = promauto.With(cfg.Registerer).NewCounter(prometheus.CounterOpts{
 		Namespace: monitor.MetricsNamespace,
@@ -424,24 +421,6 @@ func (p *Processor) insertEvents(ctx context.Context, blockEv ctypes.EventDataNe
 			if err := p.insertReporterAccumulatedReward(ctx, height, blockTime, ev); err != nil {
 				p.logger.Error("failed to store reporter accumulated reward", "error", err)
 				monitor.IncError("rewardInsert", ComponentName)
-			}
-
-		// Contains dispute details against a report. Inserted to DB for dispute monitor failsafe.
-		case "new_dispute":
-			disputeIDStr := getAttribute(ev, AttrKeyDisputeID)
-			if disputeIDStr != "" {
-				disputeID, err := strconv.ParseUint(disputeIDStr, 10, 64)
-				if err == nil {
-					p.logger.Warn("NEW DISPUTE DETECTED - inserting to DB",
-						"dispute_id", disputeID,
-						"reporter", getAttribute(ev, AttrKeyReporter),
-						"disputer", getAttribute(ev, AttrKeyDisputer),
-						"height", height,
-					)
-					if err := blockdb.InsertDispute(ctx, p.db, disputeID, uint64(height), blockTime); err != nil {
-						p.logger.Error("failed to insert dispute to DB", "dispute_id", disputeID, "error", err)
-					}
-				}
 			}
 
 		// Contains validator commission allocation per block. Used to calculate validator earnings.
@@ -964,7 +943,6 @@ func (p *Processor) insertBlockSigns(blockEv ctypes.EventDataNewBlock) {
 	// The signatures are for block at height-1
 	commitHeight := currentHeight - 1
 	blockTime := blockEv.Block.Time
-	ourValidatorSeen := false
 	for _, sig := range blockEv.Block.LastCommit.Signatures {
 		// Skip empty signatures (validator not in set at that height)
 		if len(sig.ValidatorAddress) == 0 {
@@ -985,13 +963,10 @@ func (p *Processor) insertBlockSigns(blockEv ctypes.EventDataNewBlock) {
 		// Convert to bech32 consensus address format
 		validatorAddr := sdk.ConsAddress(sig.ValidatorAddress).String()
 
-		// Track our validator's presence and log a warning if it missed signing.
-		if validatorAddr == p.cfg.ValidatorConsensusAddress {
-			ourValidatorSeen = true
-			if signed == 0 {
-				p.missedBlocks.Inc()
-				p.logger.Warn("our validator missed signing block", "height", commitHeight, "validator", validatorAddr)
-			}
+		// Log a warning if our validator missed signing while in the active set.
+		if validatorAddr == p.cfg.ValidatorConsensusAddress && signed == 0 {
+			p.missedBlocks.Inc()
+			p.logger.Warn("our validator missed signing block", "height", commitHeight, "validator", validatorAddr)
 		}
 
 		p.blockSignMtx.Lock()
@@ -1004,23 +979,10 @@ func (p *Processor) insertBlockSigns(blockEv ctypes.EventDataNewBlock) {
 		p.blockSignMtx.Unlock()
 	}
 
-	// Count actual missed blocks regardless of validator status: when our validator
-	// is jailed/unbonded it is absent from the commit entirely, so the loop above
-	// never records it. Record those as missed (signed = 0) so missed_blocks reflects
-	// reality even while it is out of the active set.
-	if p.cfg.ValidatorConsensusAddress != "" && !ourValidatorSeen {
-		p.missedBlocks.Inc()
-		p.logger.Warn("our validator absent from commit (jailed/out-of-set) — counted as missed",
-			"height", commitHeight, "validator", p.cfg.ValidatorConsensusAddress)
-		p.blockSignMtx.Lock()
-		p.blockSignBuffer = append(p.blockSignBuffer, bufferedBlockSign{
-			blockHeight: commitHeight,
-			blockTime:   blockTime,
-			validator:   p.cfg.ValidatorConsensusAddress,
-			signed:      0,
-		})
-		p.blockSignMtx.Unlock()
-	}
+	// Blocks where our validator is out of the active set (jailed/unbonded) are
+	// intentionally NOT counted as missed: it is absent from the commit entirely,
+	// exactly like every other out-of-set validator. Counting only in-set absences
+	// keeps the missed-block calculation identical for all validators.
 }
 
 func getAttribute(ev abci.Event, key string) string {
