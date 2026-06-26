@@ -1,11 +1,7 @@
 package tools
 
 import (
-	"context"
 	"flag"
-	"fmt"
-	"io"
-	"net/http"
 	"os"
 	"strings"
 )
@@ -40,42 +36,6 @@ func parseRPCURLs() []string {
 		}
 	}
 	return result
-}
-
-func queryAPI(ctx context.Context, client *http.Client, apiURLs []string, path string) ([]byte, error) {
-	var lastErr error
-
-	for _, baseURL := range apiURLs {
-		url := strings.TrimSuffix(baseURL, "/") + path
-
-		req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
-		if err != nil {
-			lastErr = err
-			continue
-		}
-
-		resp, err := client.Do(req)
-		if err != nil {
-			lastErr = err
-			continue
-		}
-
-		body, err := io.ReadAll(resp.Body)
-		_ = resp.Body.Close()
-		if err != nil {
-			lastErr = err
-			continue
-		}
-
-		if resp.StatusCode != http.StatusOK {
-			lastErr = fmt.Errorf("API returned status %d: %s", resp.StatusCode, string(body))
-			continue
-		}
-
-		return body, nil
-	}
-
-	return nil, fmt.Errorf("all API URLs failed, last error: %w", lastErr)
 }
 
 func getEnvOrDefault(key, defaultVal string) string {

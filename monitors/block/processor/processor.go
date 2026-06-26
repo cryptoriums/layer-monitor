@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"net/http"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -46,8 +45,6 @@ const (
 	AttrKeyCyclelist   = "cyclelist"
 	AttrKeyBlockNumber = "block_number"
 	AttrKeyMetaID      = "meta_id"
-	AttrKeyDisputeID   = "dispute_id"
-	AttrKeyDisputer    = "disputer"
 	AttrKeyValidator   = "validator"
 	AttrKeyAmount      = "amount"
 	AttrKeyDelegator   = "delegator"
@@ -424,24 +421,6 @@ func (p *Processor) insertEvents(ctx context.Context, blockEv ctypes.EventDataNe
 			if err := p.insertReporterAccumulatedReward(ctx, height, blockTime, ev); err != nil {
 				p.logger.Error("failed to store reporter accumulated reward", "error", err)
 				monitor.IncError("rewardInsert", ComponentName)
-			}
-
-		// Contains dispute details against a report. Inserted to DB for dispute monitor failsafe.
-		case "new_dispute":
-			disputeIDStr := getAttribute(ev, AttrKeyDisputeID)
-			if disputeIDStr != "" {
-				disputeID, err := strconv.ParseUint(disputeIDStr, 10, 64)
-				if err == nil {
-					p.logger.Warn("NEW DISPUTE DETECTED - inserting to DB",
-						"dispute_id", disputeID,
-						"reporter", getAttribute(ev, AttrKeyReporter),
-						"disputer", getAttribute(ev, AttrKeyDisputer),
-						"height", height,
-					)
-					if err := blockdb.InsertDispute(ctx, p.db, disputeID, uint64(height), blockTime); err != nil {
-						p.logger.Error("failed to insert dispute to DB", "dispute_id", disputeID, "error", err)
-					}
-				}
 			}
 
 		// Contains validator commission allocation per block. Used to calculate validator earnings.

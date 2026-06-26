@@ -20,7 +20,6 @@ const (
 	TableNameBlockSigns     = "block_signs"
 	TableNameCycleRotations = "cycle_rotations"
 	TableNameAddresses      = "addresses"
-	TableNameDisputes       = "disputes"
 )
 
 // Column names used across all tables.
@@ -60,10 +59,6 @@ const (
 	ColName      = "name"
 	ColAddress   = "address"
 	ColUpdatedAt = "updated_at"
-
-	// Disputes table columns
-	ColDisputeID = "dispute_id"
-	ColStatus    = "status"
 )
 
 // Reward types for the unified rewards table.
@@ -78,12 +73,6 @@ const (
 	AddressNameReporter           = "reporter"            // tellor1... format
 	AddressNameValidator          = "validator"           // tellorvaloper... format
 	AddressNameValidatorConsensus = "validator_consensus" // tellorvalcons... format (for block_signs queries)
-)
-
-// Dispute status values.
-const (
-	DisputeStatusOpen     = "open"
-	DisputeStatusResolved = "resolved"
 )
 
 // SQLDB wraps *sql.DB to satisfy the Db interface with context helpers.
@@ -148,9 +137,6 @@ func EnsureTables(ctx context.Context, database Db) error {
 	}
 	if err := initAddressesTable(ctx, database); err != nil {
 		return fmt.Errorf("create %s table: %w", TableNameAddresses, err)
-	}
-	if err := initDisputesTable(ctx, database); err != nil {
-		return fmt.Errorf("create %s table: %w", TableNameDisputes, err)
 	}
 	return nil
 }
@@ -323,7 +309,6 @@ func ConfigureTTL(ctx context.Context, database Db) error {
 		{TableNameBlockSigns, ColBlockTimestamp},
 		{TableNameCycleRotations, ColTimestamp},
 		{TableNameAddresses, ColUpdatedAt},
-		{TableNameDisputes, ColTimestamp},
 	}
 	for _, s := range specs {
 		q := fmt.Sprintf("ALTER TABLE %s MODIFY TTL %s + INTERVAL 2 MONTH", s.table, s.col)
@@ -391,70 +376,4 @@ func ReporterAddr(ctx context.Context, database Db) (string, error) {
 // Returns empty string if not found.
 func ValidatorAddr(ctx context.Context, database Db) (string, error) {
 	return GetAddress(ctx, database, AddressNameValidator)
-}
-
-// initDisputesTable creates the disputes table for tracking open disputes.
-// Used as a failsafe backup when API queries fail.
-func initDisputesTable(ctx context.Context, database Db) error {
-	query := fmt.Sprintf(`
-		CREATE TABLE IF NOT EXISTS %s (
-			%s UInt64,
-			%s UInt64,
-			%s DateTime64(3, 'UTC'),
-			%s LowCardinality(String) DEFAULT '%s'
-		)
-		ENGINE = ReplacingMergeTree(%s)
-		ORDER BY %s
-	`, TableNameDisputes,
-		ColDisputeID, ColBlockHeight, ColTimestamp, ColStatus, DisputeStatusOpen,
-		ColTimestamp, ColDisputeID)
-
-	_, err := database.Exec(ctx, query)
-	return err
-}
-
-// InsertDispute inserts a new dispute into the disputes table.
-func InsertDispute(
-	ctx context.Context,
-	database Db,
-	disputeID uint64,
-	blockHeight uint64,
-	timestamp time.Time,
-) error {
-	if disputeID == 0 {
-		return errors.New("dispute ID is required")
-	}
-
-	query := fmt.Sprintf(`
-		INSERT INTO %s (%s, %s, %s, %s)
-		VALUES (?, ?, ?, ?)
-	`, TableNameDisputes, ColDisputeID, ColBlockHeight, ColTimestamp, ColStatus)
-
-	if _, err := database.Exec(ctx, query, disputeID, blockHeight, timestamp, DisputeStatusOpen); err != nil {
-		return fmt.Errorf("insert dispute %d: %w", disputeID, err)
-	}
-	return nil
-}
-
-// GetOpenDisputes retrieves all open dispute IDs from the disputes table.
-func GetOpenDisputes(ctx context.Context, database Db) ([]uint64, error) {
-	query := fmt.Sprintf(`
-		SELECT %s FROM %s FINAL WHERE %s = ? ORDER BY %s
-	`, ColDisputeID, TableNameDisputes, ColStatus, ColDisputeID)
-
-	rows, err := database.Query(ctx, query, DisputeStatusOpen)
-	if err != nil {
-		return nil, fmt.Errorf("query open disputes: %w", err)
-	}
-	defer func() { _ = rows.Close() }()
-
-	var disputes []uint64
-	for rows.Next() {
-		var id uint64
-		if err := rows.Scan(&id); err != nil {
-			return nil, fmt.Errorf("scan dispute id: %w", err)
-		}
-		disputes = append(disputes, id)
-	}
-	return disputes, nil
 }
