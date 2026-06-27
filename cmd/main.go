@@ -19,6 +19,7 @@ import (
 	"github.com/cryptoriums/layer-monitor/monitors/block"
 	"github.com/cryptoriums/layer-monitor/monitors/domain"
 	"github.com/cryptoriums/layer-monitor/monitors/jail"
+	"github.com/cryptoriums/layer-monitor/monitors/upgrade"
 	"github.com/cryptoriums/layer-monitor/signerclient"
 	"github.com/cryptoriums/layer-monitor/web"
 	"github.com/joho/godotenv"
@@ -205,6 +206,17 @@ func runMonitor(cmd *cobra.Command, _ []string) {
 	go func() {
 		if err := jailMonitor.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
 			logger.Error("jail monitor stopped with error", "error", err)
+		}
+	}()
+
+	upgradeMonitor, err := upgrade.New(logger, upgrade.Config{LayerAPIURLs: cfg.layerAPIURLs}, reg)
+	if err != nil {
+		logger.Error("failed to create upgrade monitor", "error", err)
+		os.Exit(1)
+	}
+	go func() {
+		if err := upgradeMonitor.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
+			logger.Error("upgrade monitor stopped with error", "error", err)
 		}
 	}()
 
