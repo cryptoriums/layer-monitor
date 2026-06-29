@@ -91,34 +91,43 @@ func (m *Monitor) Run(ctx context.Context) error {
 
 // check updates the upgrade metrics from the scheduled plan and voting proposals.
 func (m *Monitor) check(ctx context.Context) {
-	height := m.currentHeight(ctx)
+	m.updatePlanMetrics(ctx, m.currentHeight(ctx))
+	m.updateProposedMetric(ctx)
+}
 
+// updatePlanMetrics sets pending/plan_height/blocks_remaining from the scheduled plan.
+func (m *Monitor) updatePlanMetrics(ctx context.Context, height int64) {
 	plan, err := m.currentPlan(ctx)
 	if err != nil {
 		// Leave metrics unchanged on a transient query error rather than clearing a
 		// real pending upgrade.
 		m.logger.Warn("upgrade monitor: current_plan query failed", "error", err)
-	} else if plan != nil {
-		remaining := plan.Height - height
-		if remaining < 0 {
-			remaining = 0
-		}
-		m.pending.Set(1)
-		m.planHeight.Set(float64(plan.Height))
-		m.blocksRemaining.Set(float64(remaining))
-		m.logger.Error("CHAIN UPGRADE SCHEDULED",
-			"name", plan.Name, "height", plan.Height, "current_height", height, "blocks_remaining", remaining)
-	} else {
+		return
+	}
+	if plan == nil {
 		m.pending.Set(0)
 		m.planHeight.Set(0)
 		m.blocksRemaining.Set(0)
+		return
 	}
 
+	remaining := plan.Height - height
+	if remaining < 0 {
+		remaining = 0
+	}
+	m.pending.Set(1)
+	m.planHeight.Set(float64(plan.Height))
+	m.blocksRemaining.Set(float64(remaining))
+	m.logger.Error("CHAIN UPGRADE SCHEDULED",
+		"name", plan.Name, "height", plan.Height, "current_height", height, "blocks_remaining", remaining)
+}
+
+// updateProposedMetric sets proposed=1 while a software-upgrade proposal is in voting.
+func (m *Monitor) updateProposedMetric(ctx context.Context) {
+	m.proposed.Set(0)
 	if name, ok := m.upgradeProposalInVoting(ctx); ok {
 		m.proposed.Set(1)
 		m.logger.Warn("software-upgrade proposal in voting period", "name", name)
-	} else {
-		m.proposed.Set(0)
 	}
 }
 
