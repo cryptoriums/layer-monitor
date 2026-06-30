@@ -5,18 +5,25 @@ package upgrade
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
-	"strconv"
 	"strings"
 	"time"
 
+	"github.com/cryptoriums/layer-monitor/encoding"
 	monitor "github.com/cryptoriums/layer-monitor/metrics"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
 
 	"cosmossdk.io/log"
+	upgradetypes "cosmossdk.io/x/upgrade/types"
+
+	"github.com/cosmos/cosmos-sdk/client/grpc/cmtservice"
+	"github.com/cosmos/cosmos-sdk/codec"
+	sdk "github.com/cosmos/cosmos-sdk/types"
+	govv1 "github.com/cosmos/cosmos-sdk/x/gov/types/v1"
+	"github.com/cosmos/gogoproto/proto"
 )
 
 const (
@@ -35,6 +42,7 @@ type Monitor struct {
 	logger     log.Logger
 	cfg        Config
 	httpClient *http.Client
+	cdc        *codec.ProtoCodec
 
 	pending         prometheus.Gauge // 1 when an upgrade plan is scheduled
 	proposed        prometheus.Gauge // 1 when a software-upgrade proposal is in voting
@@ -64,6 +72,7 @@ func New(logger log.Logger, cfg Config, reg prometheus.Registerer) (*Monitor, er
 		logger:          logger.With("component", ComponentName),
 		cfg:             cfg,
 		httpClient:      &http.Client{Timeout: monitor.DefaultRequestTimeout},
+		cdc:             encoding.MakeCodec(),
 		pending:         gauge("pending", "1 if a chain upgrade is scheduled (current_plan set), 0 otherwise"),
 		proposed:        gauge("proposed", "1 if a software-upgrade governance proposal is in the voting period, 0 otherwise"),
 		planHeight:      gauge("plan_height", "Target block height of the scheduled upgrade (0 if none)"),
@@ -131,79 +140,59 @@ func (m *Monitor) updateProposedMetric(ctx context.Context) {
 	}
 }
 
-type planInfo struct {
-	Name   string
-	Height int64
-}
-
 // currentPlan returns the scheduled upgrade plan, or nil if none is set.
-func (m *Monitor) currentPlan(ctx context.Context) (*planInfo, error) {
-	var resp struct {
-		Plan *struct {
-			Name   string `json:"name"`
-			Height string `json:"height"`
-		} `json:"plan"`
-	}
-	if err := m.getJSON(ctx, "/cosmos/upgrade/v1beta1/current_plan", &resp); err != nil {
+func (m *Monitor) currentPlan(ctx context.Context) (*upgradetypes.Plan, error) {
+	var resp upgradetypes.QueryCurrentPlanResponse
+	if err := m.getProto(ctx, "/cosmos/upgrade/v1beta1/current_plan", &resp); err != nil {
 		return nil, err
 	}
-	if resp.Plan == nil || resp.Plan.Name == "" {
-		return nil, nil
-	}
-	h, _ := strconv.ParseInt(resp.Plan.Height, 10, 64)
-	return &planInfo{Name: resp.Plan.Name, Height: h}, nil
+	return resp.Plan, nil
 }
 
 // currentHeight returns the latest block height, or 0 if it cannot be fetched.
 func (m *Monitor) currentHeight(ctx context.Context) int64 {
-	var resp struct {
-		Block struct {
-			Header struct {
-				Height string `json:"height"`
-			} `json:"header"`
-		} `json:"block"`
-	}
-	if err := m.getJSON(ctx, "/cosmos/base/tendermint/v1beta1/blocks/latest", &resp); err != nil {
+	var resp cmtservice.GetLatestBlockResponse
+	if err := m.getProto(ctx, "/cosmos/base/tendermint/v1beta1/blocks/latest", &resp); err != nil {
 		m.logger.Debug("upgrade monitor: latest height query failed", "error", err)
 		return 0
 	}
-	h, _ := strconv.ParseInt(resp.Block.Header.Height, 10, 64)
-	return h
+	if resp.SdkBlock != nil {
+		return resp.SdkBlock.Header.Height
+	}
+	return 0
 }
 
 // upgradeProposalInVoting reports whether a software-upgrade proposal is in the voting
 // period, returning its plan name.
 func (m *Monitor) upgradeProposalInVoting(ctx context.Context) (string, bool) {
-	var resp struct {
-		Proposals []struct {
-			Status   string `json:"status"`
-			Messages []struct {
-				Type string `json:"@type"`
-				Plan *struct {
-					Name string `json:"name"`
-				} `json:"plan"`
-			} `json:"messages"`
-		} `json:"proposals"`
-	}
-	if err := m.getJSON(ctx, "/cosmos/gov/v1/proposals?pagination.limit=200", &resp); err != nil {
+	var resp govv1.QueryProposalsResponse
+	if err := m.getProto(ctx, "/cosmos/gov/v1/proposals?pagination.limit=200", &resp); err != nil {
 		m.logger.Debug("upgrade monitor: proposals query failed", "error", err)
 		return "", false
 	}
+	swTypeURL := sdk.MsgTypeURL(&upgradetypes.MsgSoftwareUpgrade{})
 	for _, p := range resp.Proposals {
-		if p.Status != "PROPOSAL_STATUS_VOTING_PERIOD" {
+		if p.Status != govv1.StatusVotingPeriod {
 			continue
 		}
-		for _, msg := range p.Messages {
-			if strings.Contains(msg.Type, "MsgSoftwareUpgrade") && msg.Plan != nil {
-				return msg.Plan.Name, true
+		for _, anyMsg := range p.Messages {
+			if anyMsg.TypeUrl != swTypeURL {
+				continue
 			}
+			var sw upgradetypes.MsgSoftwareUpgrade
+			if err := m.cdc.Unmarshal(anyMsg.Value, &sw); err != nil {
+				continue
+			}
+			return sw.Plan.Name, true
 		}
 	}
 	return "", false
 }
 
-// getJSON performs a GET against each configured API URL until one succeeds.
-func (m *Monitor) getJSON(ctx context.Context, path string, v interface{}) error {
+// getProto performs a GET against each configured API URL until one succeeds, decoding the
+// body into the given proto message with the codec's strict proto-JSON unmarshal (so a
+// change to the chain's response shape surfaces as an error instead of being dropped).
+func (m *Monitor) getProto(ctx context.Context, path string, msg proto.Message) error {
 	var lastErr error
 	for _, base := range m.cfg.LayerAPIURLs {
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(base, "/")+path, nil)
@@ -221,10 +210,14 @@ func (m *Monitor) getJSON(ctx context.Context, path string, v interface{}) error
 			lastErr = fmt.Errorf("GET %s -> HTTP %d", path, res.StatusCode)
 			continue
 		}
-		err = json.NewDecoder(res.Body).Decode(v)
+		body, err := io.ReadAll(res.Body)
 		_ = res.Body.Close()
 		if err != nil {
 			lastErr = err
+			continue
+		}
+		if err := m.cdc.UnmarshalJSON(body, msg); err != nil {
+			lastErr = fmt.Errorf("decode %s: %w", path, err)
 			continue
 		}
 		return nil
