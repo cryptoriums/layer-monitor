@@ -48,6 +48,7 @@ type Monitor struct {
 	proposed        prometheus.Gauge // 1 when a software-upgrade proposal is in voting
 	planHeight      prometheus.Gauge // scheduled upgrade height (0 if none)
 	blocksRemaining prometheus.Gauge // blocks until the scheduled height (0 if none)
+	proposalsVoting prometheus.Gauge // number of governance proposals in the voting period
 }
 
 // New creates a new upgrade monitor and registers its metrics.
@@ -77,6 +78,12 @@ func New(logger log.Logger, cfg Config, reg prometheus.Registerer) (*Monitor, er
 		proposed:        gauge("proposed", "1 if a software-upgrade governance proposal is in the voting period, 0 otherwise"),
 		planHeight:      gauge("plan_height", "Target block height of the scheduled upgrade (0 if none)"),
 		blocksRemaining: gauge("blocks_remaining", "Blocks remaining until the scheduled upgrade height (0 if none)"),
+		proposalsVoting: promauto.With(reg).NewGauge(prometheus.GaugeOpts{
+			Namespace: monitor.MetricsNamespace,
+			Subsystem: "gov",
+			Name:      "proposals_voting",
+			Help:      "Number of governance proposals currently in the voting period",
+		}),
 	}, nil
 }
 
@@ -98,10 +105,10 @@ func (m *Monitor) Run(ctx context.Context) error {
 	}
 }
 
-// check updates the upgrade metrics from the scheduled plan and voting proposals.
+// check updates the upgrade and governance-proposal metrics.
 func (m *Monitor) check(ctx context.Context) {
 	m.updatePlanMetrics(ctx, m.currentHeight(ctx))
-	m.updateProposedMetric(ctx)
+	m.updateProposalMetrics(ctx)
 }
 
 // updatePlanMetrics sets pending/plan_height/blocks_remaining from the scheduled plan.
@@ -131,12 +138,43 @@ func (m *Monitor) updatePlanMetrics(ctx context.Context, height int64) {
 		"name", plan.Name, "height", plan.Height, "current_height", height, "blocks_remaining", remaining)
 }
 
-// updateProposedMetric sets proposed=1 while a software-upgrade proposal is in voting.
-func (m *Monitor) updateProposedMetric(ctx context.Context) {
+// updateProposalMetrics counts governance proposals in the voting period and flags whether
+// any of them is a software upgrade. Metrics are left unchanged on a query error.
+func (m *Monitor) updateProposalMetrics(ctx context.Context) {
+	var resp govv1.QueryProposalsResponse
+	if err := m.getProto(ctx, "/cosmos/gov/v1/proposals?pagination.limit=200", &resp); err != nil {
+		m.logger.Debug("upgrade monitor: proposals query failed", "error", err)
+		return
+	}
+
+	swTypeURL := sdk.MsgTypeURL(&upgradetypes.MsgSoftwareUpgrade{})
+	votingCount := 0
+	upgradeName := ""
+	for _, p := range resp.Proposals {
+		if p.Status != govv1.StatusVotingPeriod {
+			continue
+		}
+		votingCount++
+		for _, anyMsg := range p.Messages {
+			if anyMsg.TypeUrl != swTypeURL {
+				continue
+			}
+			var sw upgradetypes.MsgSoftwareUpgrade
+			if err := m.cdc.Unmarshal(anyMsg.Value, &sw); err != nil {
+				continue
+			}
+			upgradeName = sw.Plan.Name
+		}
+	}
+
+	m.proposalsVoting.Set(float64(votingCount))
 	m.proposed.Set(0)
-	if name, ok := m.upgradeProposalInVoting(ctx); ok {
+	if upgradeName != "" {
 		m.proposed.Set(1)
-		m.logger.Warn("software-upgrade proposal in voting period", "name", name)
+		m.logger.Warn("software-upgrade proposal in voting period", "name", upgradeName)
+	}
+	if votingCount > 0 {
+		m.logger.Info("governance proposals in voting period", "count", votingCount)
 	}
 }
 
@@ -160,33 +198,6 @@ func (m *Monitor) currentHeight(ctx context.Context) int64 {
 		return resp.SdkBlock.Header.Height
 	}
 	return 0
-}
-
-// upgradeProposalInVoting reports whether a software-upgrade proposal is in the voting
-// period, returning its plan name.
-func (m *Monitor) upgradeProposalInVoting(ctx context.Context) (string, bool) {
-	var resp govv1.QueryProposalsResponse
-	if err := m.getProto(ctx, "/cosmos/gov/v1/proposals?pagination.limit=200", &resp); err != nil {
-		m.logger.Debug("upgrade monitor: proposals query failed", "error", err)
-		return "", false
-	}
-	swTypeURL := sdk.MsgTypeURL(&upgradetypes.MsgSoftwareUpgrade{})
-	for _, p := range resp.Proposals {
-		if p.Status != govv1.StatusVotingPeriod {
-			continue
-		}
-		for _, anyMsg := range p.Messages {
-			if anyMsg.TypeUrl != swTypeURL {
-				continue
-			}
-			var sw upgradetypes.MsgSoftwareUpgrade
-			if err := m.cdc.Unmarshal(anyMsg.Value, &sw); err != nil {
-				continue
-			}
-			return sw.Plan.Name, true
-		}
-	}
-	return "", false
 }
 
 // getProto performs a GET against each configured API URL until one succeeds, decoding the

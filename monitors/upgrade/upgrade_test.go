@@ -114,6 +114,7 @@ func TestUpgradeMetrics_NoUpgrade(t *testing.T) {
 	assertGauge(t, "proposed", m.proposed, 0)
 	assertGauge(t, "plan_height", m.planHeight, 0)
 	assertGauge(t, "blocks_remaining", m.blocksRemaining, 0)
+	assertGauge(t, "gov_proposals_voting", m.proposalsVoting, 0)
 }
 
 func TestUpgradeMetrics_Scheduled(t *testing.T) {
@@ -152,7 +153,24 @@ func TestUpgradeMetrics_ProposalInVoting(t *testing.T) {
 	m.check(context.Background())
 
 	assertGauge(t, "proposed", m.proposed, 1)
+	assertGauge(t, "gov_proposals_voting", m.proposalsVoting, 1)
 	assertGauge(t, "pending", m.pending, 0)
+}
+
+func TestUpgradeMetrics_GovProposalInVoting_NotUpgrade(t *testing.T) {
+	// A non-upgrade proposal in voting counts toward gov_proposals_voting but not proposed.
+	props := &govv1.QueryProposalsResponse{
+		Proposals: []*govv1.Proposal{{Id: 7, Status: govv1.StatusVotingPeriod}},
+	}
+	mc := &mockChain{t: t, cdc: encoding.MakeCodec(), height: 100, proposals: props}
+	srv := mc.server()
+	defer srv.Close()
+
+	m := newTestMonitor(t, srv.URL)
+	m.check(context.Background())
+
+	assertGauge(t, "gov_proposals_voting", m.proposalsVoting, 1)
+	assertGauge(t, "proposed", m.proposed, 0)
 }
 
 func TestUpgradeMetrics_QueryErrorKeepsPreviousPending(t *testing.T) {
