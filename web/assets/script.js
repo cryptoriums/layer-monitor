@@ -315,6 +315,45 @@ function handleAmountInput(e) {
   input.value = value;
 }
 
+// Cached reporter minimum selector stake, in loya. null = not yet known / unavailable.
+let REPORTER_MIN_LOYA = null;
+
+// Fetch the reporter's on-chain min_tokens_required (loya) from the REST API.
+// Returns a number, or null when it cannot be determined (validation is then skipped
+// and the chain remains the source of truth). Result is cached after the first call.
+async function fetchReporterMinLoya() {
+  if (REPORTER_MIN_LOYA !== null) {
+    return REPORTER_MIN_LOYA;
+  }
+  if (!/^https?:\/\//.test(LAYER_CHAIN_INFO.rest || '')) {
+    return null;
+  }
+  try {
+    const resp = await fetch(`${LAYER_CHAIN_INFO.rest}/tellor-io/layer/reporter/reporters`);
+    if (!resp.ok) {
+      return null;
+    }
+    const data = await resp.json();
+    for (const r of (data.reporters || [])) {
+      if (r.address !== REPORTER_ADDR) {
+        continue;
+      }
+      const min = parseInt((r.metadata || {}).min_tokens_required || '0', 10);
+      REPORTER_MIN_LOYA = Number.isFinite(min) && min > 0 ? min : null;
+      return REPORTER_MIN_LOYA;
+    }
+    return null;
+  } catch (e) {
+    console.log('Could not fetch reporter minimum:', e.message);
+    return null;
+  }
+}
+
+// Format a loya amount as a trimmed TRB string (e.g. 10000000 -> "10").
+function loyaToTRBString(loya) {
+  return String(loya / Math.pow(10, DECIMALS));
+}
+
 // Open delegation modal
 async function openDelegateModal() {
   const modal = document.getElementById('delegateModal');
@@ -355,9 +394,14 @@ async function loadStakeInfo() {
     return;
   }
 
+  const minLoya = await fetchReporterMinLoya();
+  const minNote = minLoya
+    ? `<div style="margin-top: 8px; color: #fbbf24;">This reporter requires more than <strong>${loyaToTRBString(minLoya)} TRB</strong> to select. Stake a little above it to cover staking rounding.</div>`
+    : '';
   stakeInfoDiv.innerHTML = `
     <div style="text-align: center; padding: 10px; color: #94a3b8;">
       Enter the amount of TRB to delegate to our validator and select our reporter.
+      ${minNote}
     </div>
   `;
 }
@@ -402,6 +446,18 @@ async function executeDelegation() {
   if (!amount || amount <= 0) {
     showStatus('Please enter a valid amount', true);
     return;
+  }
+
+  // Pre-flight: the reporter enforces a minimum selector stake on-chain, and Cosmos
+  // staking rounds delegated tokens down by up to 1 loya. Require strictly more than
+  // the minimum so we do not broadcast a tx that is guaranteed to fail (and burn a fee).
+  const minLoya = await fetchReporterMinLoya();
+  if (minLoya) {
+    const amountLoya = Math.floor(amount * Math.pow(10, DECIMALS));
+    if (amountLoya <= minLoya) {
+      showStatus(`This reporter requires more than ${loyaToTRBString(minLoya)} TRB. Please enter a bit more than ${loyaToTRBString(minLoya)} TRB.`, true);
+      return;
+    }
   }
 
   const confirmBtn = document.getElementById('confirmBtn');
