@@ -448,18 +448,6 @@ async function executeDelegation() {
     return;
   }
 
-  // Pre-flight: the reporter enforces a minimum selector stake on-chain, and Cosmos
-  // staking rounds delegated tokens down by up to 1 loya. Require strictly more than
-  // the minimum so we do not broadcast a tx that is guaranteed to fail (and burn a fee).
-  const minLoya = await fetchReporterMinLoya();
-  if (minLoya) {
-    const amountLoya = Math.floor(amount * Math.pow(10, DECIMALS));
-    if (amountLoya <= minLoya) {
-      showStatus(`This reporter requires more than ${loyaToTRBString(minLoya)} TRB. Please enter a bit more than ${loyaToTRBString(minLoya)} TRB.`, true);
-      return;
-    }
-  }
-
   const confirmBtn = document.getElementById('confirmBtn');
   setButtonLoading(confirmBtn, true, 'Connecting...');
 
@@ -539,14 +527,50 @@ async function executeDelegation() {
     console.log("[7] Parsed account_number:", accountNumber);
     console.log("[7] Parsed sequence:", sequence);
 
-    // Build proto messages
-    const msgDelegate = encodeMsgDelegate(sender, VALIDATOR_ADDR, DENOM, amountInLoya);
-    const msgSelectReporter = encodeMsgSelectReporter(sender, REPORTER_ADDR);
+    // A selector can select only one reporter, so re-selecting fails on-chain with
+    // "selector already exists" and reverts the whole tx. Check the wallet's current
+    // selection and adapt: add-stake-only if it already selects this reporter, block if
+    // it selects a different one, otherwise delegate + select as a first-time delegator.
+    let alreadySelectsTarget = false;
+    try {
+      const selResp = await fetch(`${LAYER_CHAIN_INFO.rest}/tellor-io/layer/reporter/selector-reporter/${sender}`);
+      if (selResp.ok) {
+        const current = (await selResp.json()).reporter || '';
+        console.log("[7b] Current reporter selection:", current || "(none)");
+        if (current === REPORTER_ADDR) {
+          alreadySelectsTarget = true;
+        } else if (current) {
+          showStatus('This wallet already selects a different reporter. Switch or unselect it first, then delegate here.', true);
+          setButtonLoading(confirmBtn, false, 'Confirm');
+          return;
+        }
+      }
+    } catch (e) {
+      console.log("[7b] Selection check failed, treating as new selection:", e.message);
+    }
 
-    const encodedMsgs = [
-      encodeAny("/cosmos.staking.v1beta1.MsgDelegate", msgDelegate),
-      encodeAny("/layer.reporter.MsgSelectReporter", msgSelectReporter)
-    ];
+    // The reporter's on-chain minimum only applies when selecting for the first time
+    // (strict ">" because staking rounds down ~1 loya). Adding to an existing selection
+    // has no minimum, so skip the check then.
+    if (!alreadySelectsTarget) {
+      const minLoya = await fetchReporterMinLoya();
+      if (minLoya && Math.floor(amount * Math.pow(10, DECIMALS)) <= minLoya) {
+        showStatus(`This reporter requires more than ${loyaToTRBString(minLoya)} TRB. Please enter a bit more than ${loyaToTRBString(minLoya)} TRB.`, true);
+        setButtonLoading(confirmBtn, false, 'Confirm');
+        return;
+      }
+    }
+
+    // Build proto messages. Always delegate; only add the select message when this wallet
+    // is not already selecting the target reporter.
+    const msgDelegate = encodeMsgDelegate(sender, VALIDATOR_ADDR, DENOM, amountInLoya);
+    const encodedMsgs = [encodeAny("/cosmos.staking.v1beta1.MsgDelegate", msgDelegate)];
+    if (!alreadySelectsTarget) {
+      const msgSelectReporter = encodeMsgSelectReporter(sender, REPORTER_ADDR);
+      encodedMsgs.push(encodeAny("/layer.reporter.MsgSelectReporter", msgSelectReporter));
+    } else {
+      console.log("[8] Already selecting this reporter; delegate-only (adding stake).");
+    }
 
     // Build TxBody
     const bodyBytes = encodeTxBody(encodedMsgs, "");
