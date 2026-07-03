@@ -364,8 +364,12 @@ func parseMonitorConfig() (monitorConfig, error) {
 		}
 	}
 
-	cfg.publicRPCURL = firstPublicURL(nodesStr)
-	cfg.publicAPIURL = firstPublicURL(apiURLsStr)
+	// Public RPC/REST URLs used by the browser (Keplr chain suggest + delegation fetches).
+	// These must be browser-reachable HTTPS endpoints, so PUBLIC_RPC_URL / PUBLIC_API_URL
+	// take precedence; the internal RPC_NODES / API_URLS (used server-side) are only a
+	// fallback and are usually not reachable from a browser.
+	cfg.publicRPCURL = getEnv("PUBLIC_RPC_URL", firstPublicURL(nodesStr))
+	cfg.publicAPIURL = getEnv("PUBLIC_API_URL", firstPublicURL(apiURLsStr))
 	cfg.explorerURL = os.Getenv("EXPLORER_URL")
 
 	// Remote signer connection (optional). When REMOTE_SIGNER_ADDR is set the

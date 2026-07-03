@@ -415,6 +415,14 @@ async function executeDelegation() {
       return;
     }
 
+    // Guard: Keplr's chain-suggest and the delegation fetches need public, browser
+    // reachable HTTPS endpoints. If they are not configured, fail with a clear message
+    // instead of suggesting an empty rpc to Keplr or fetching HTML (which then hits the
+    // "Unexpected token '<'" JSON parse error).
+    if (!/^https?:\/\//.test(LAYER_CHAIN_INFO.rpc || '') || !/^https?:\/\//.test(LAYER_CHAIN_INFO.rest || '')) {
+      throw new Error('Chain endpoints not configured: the monitor has no public RPC/REST URL. Ask the operator to set PUBLIC_RPC_URL and PUBLIC_API_URL.');
+    }
+
     console.log("=== DELEGATION DEBUG START ===");
     console.log("[1] Keplr detected, suggesting chain...");
     console.log("[1] Chain ID:", CHAIN_ID);
