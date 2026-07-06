@@ -224,6 +224,43 @@ const Long = {
           </div>`;
       }
 
+      // Delegators to this validator, independent of reporter selection. Shows any stake
+      // delegated to us even when the delegator selected a different reporter (or none).
+      if (v.has_delegators && v.delegators && v.delegators.length > 0) {
+        html += `
+          <div class="tree-reporters-container">
+            <div class="tree-reporter-group">
+              <div class="tree-line-horizontal"></div>
+              <div class="tree-reporter-card">
+                <div class="tree-reporter-header">
+                  <div class="tree-reporter-info">
+                    <span class="tree-reporter-name">Delegators to this validator</span>
+                  </div>
+                </div>
+              </div>
+              <div class="tree-selectors-container">`;
+        for (let dIdx = 0; dIdx < v.delegators.length; dIdx++) {
+          const d = v.delegators[dIdx];
+          const isLastDel = dIdx === v.delegators.length - 1;
+          html += `
+                <div class="tree-selector-group ${isLastDel ? 'tree-last' : ''}">
+                  <div class="tree-line-horizontal"></div>
+                  <div class="tree-selector-card">
+                    <span class="tree-selector-dot"></span>
+                    <span class="tree-selector-name">${escapeHtml(d.short_address)}</span>
+                    <div class="tree-selector-stats">
+                      <span class="tree-stat-value-inline">${escapeHtml(d.stake)}</span>
+                      <span class="tree-stat-value-inline" title="reporter selected">${escapeHtml(d.reporter)}</span>
+                    </div>
+                  </div>
+                </div>`;
+        }
+        html += `
+              </div>
+            </div>
+          </div>`;
+      }
+
       html += '</div>';
     }
 
