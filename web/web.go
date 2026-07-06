@@ -1254,17 +1254,19 @@ func (s *Server) buildValidatorTree(ctx context.Context) []ValidatorTree {
 			validators[i].Jailed = validators[i].Validator.Jailed
 		}
 
-		// For our validator, list ALL delegators independent of reporter selection, so a
-		// stake delegated to us still shows even when the selector picked another reporter.
+		// For our validator, list its direct Delegations: delegators to the validator that
+		// did NOT select our reporter. Those that did appear under our reporter's own
+		// Delegations, so listing them here too would duplicate. This surfaces stake
+		// delegated to us that selected a different reporter (or none), e.g. a test wallet.
 		if validators[i].Validator != nil && validators[i].Validator.OperatorAddress == ourValidatorAddr {
 			for _, d := range s.fetchValidatorDelegators(ctx, ourValidatorAddr) {
 				addr := d.Delegation.DelegatorAddress
 				rep := s.fetchSelectorReporter(ctx, addr)
+				if rep == ourReporterAddr {
+					continue
+				}
 				repLabel := "none"
-				switch {
-				case rep == ourReporterAddr:
-					repLabel = "our reporter"
-				case rep != "":
+				if rep != "" {
 					repLabel = truncateAddress(rep)
 				}
 				validators[i].Delegators = append(validators[i].Delegators, DelegatorTree{
