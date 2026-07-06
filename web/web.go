@@ -54,6 +54,8 @@ type Config struct {
 	PublicAPIURL       string        `yaml:"public_api_url"`       // Public API URL for browser clients
 	ExplorerURL        string        `yaml:"explorer_url"`         // Block explorer URL (e.g., "https://tellorscan.com")
 	WalletAddress      string        `yaml:"wallet_address"`       // Wallet address (tellor1xxx)
+	DelegateReporter   string        `yaml:"delegate_reporter"`    // Override one-click delegation reporter (default: WalletAddress)
+	DelegateValidator  string        `yaml:"delegate_validator"`   // Override one-click delegation validator (default: operator of WalletAddress)
 	LookbackPeriodDays int           `yaml:"lookback_period_days"` // Days to look back for statistics (default 7)
 	StatsPeriodDays    int           `yaml:"stats_period_days"`    // Days to display in Network Statistics section (default 30)
 
@@ -422,6 +424,17 @@ func (s *Server) handleRoot(w http.ResponseWriter, r *http.Request) {
 	// Derive addresses and moniker from wallet
 	ourReporterAddr := s.cfg.WalletAddress
 	ourValidatorAddr := cryptoaddr.ToValidatorOperator(s.cfg.WalletAddress)
+
+	// One-click delegation target. Defaults to the operator's own reporter/validator; the
+	// env overrides let the flow be tested against a low-min reporter with a small stake.
+	delegateReporterAddr := ourReporterAddr
+	if s.cfg.DelegateReporter != "" {
+		delegateReporterAddr = s.cfg.DelegateReporter
+	}
+	delegateValidatorAddr := ourValidatorAddr
+	if s.cfg.DelegateValidator != "" {
+		delegateValidatorAddr = s.cfg.DelegateValidator
+	}
 	ourMoniker := ""
 	if reporter, ok := reporters[s.cfg.WalletAddress]; ok && reporter != nil && reporter.Metadata != nil {
 		ourMoniker = reporter.Metadata.Moniker
@@ -461,8 +474,8 @@ func (s *Server) handleRoot(w http.ResponseWriter, r *http.Request) {
 		"TotalValidating":   rewardStats.TotalValidating,
 		"OurValidating":     rewardStats.OurValidating,
 		"OurMoniker":        ourMoniker,
-		"OurReporterAddr":   ourReporterAddr,
-		"OurValidatorAddr":  ourValidatorAddr,
+		"OurReporterAddr":   delegateReporterAddr,
+		"OurValidatorAddr":  delegateValidatorAddr,
 		"OperatorStartYear": OperatorStartYear,
 		"ExperienceYears":   experienceYears,
 		"LayerAPIURL":       s.cfg.PublicAPIURL,
