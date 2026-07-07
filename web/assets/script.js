@@ -136,21 +136,12 @@ const Long = {
             </div>
           </div>`;
 
-      // Delegations to this validator (delegators that did not select our reporter; the
-      // ones that did appear under that reporter's own Delegations below).
+      // Delegators to this validator (those that did not select our reporter; the ones that
+      // did appear under that reporter below). Shown as addresses indented under the validator.
       if (v.has_delegators && v.delegators && v.delegators.length > 0) {
         html += `
           <div class="tree-reporters-container">
-            <div class="tree-reporter-group">
-              <div class="tree-line-horizontal"></div>
-              <div class="tree-reporter-card">
-                <div class="tree-reporter-header">
-                  <div class="tree-reporter-info">
-                    <span class="tree-reporter-name">Delegations</span>
-                  </div>
-                </div>
-              </div>
-              <div class="tree-selectors-container">`;
+            <div class="tree-selectors-container">`;
         for (let dIdx = 0; dIdx < v.delegators.length; dIdx++) {
           const d = v.delegators[dIdx];
           const isLastDel = dIdx === v.delegators.length - 1;
@@ -168,7 +159,6 @@ const Long = {
                 </div>`;
         }
         html += `
-              </div>
             </div>
           </div>`;
       }
@@ -217,7 +207,6 @@ const Long = {
           // Delegations (the reporter's selectors)
           if (hasSelectors) {
             html += '<div class="tree-selectors-container">';
-            html += '<div class="tree-selector-group"><div class="tree-line-horizontal"></div><span class="tree-selector-name" style="opacity:0.55;font-size:0.72rem;text-transform:uppercase;letter-spacing:0.04em;">Delegations</span></div>';
             for (let sIdx = 0; sIdx < r.selectors.length; sIdx++) {
               const s = r.selectors[sIdx];
               const sMoniker = s.moniker || '';
