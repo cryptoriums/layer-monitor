@@ -150,10 +150,12 @@ const Long = {
                   <div class="tree-line-horizontal"></div>
                   <div class="tree-selector-card">
                     <span class="tree-selector-dot"></span>
-                    <span class="tree-selector-name">${escapeHtml(d.short_address)}</span>
+                    <span class="tree-selector-name" title="selected reporter: ${escapeHtml(d.reporter)}">${escapeHtml(d.short_address)}</span>
                     <div class="tree-selector-stats">
+                      <span class="tree-stat-value-inline">-</span>
                       <span class="tree-stat-value-inline">${escapeHtml(d.stake)}</span>
-                      <span class="tree-stat-value-inline" title="reporter selected">${escapeHtml(d.reporter)}</span>
+                      <span class="tree-stat-value-inline tree-stat-rewards">-</span>
+                      <span class="tree-stat-value-inline">-</span>
                     </div>
                   </div>
                 </div>`;
