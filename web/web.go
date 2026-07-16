@@ -54,6 +54,8 @@ type Config struct {
 	PublicAPIURL       string        `yaml:"public_api_url"`       // Public API URL for browser clients
 	ExplorerURL        string        `yaml:"explorer_url"`         // Block explorer URL (e.g., "https://tellorscan.com")
 	WalletAddress      string        `yaml:"wallet_address"`       // Wallet address (tellor1xxx)
+	DelegateReporter   string        `yaml:"delegate_reporter"`    // Override one-click delegation reporter (default: WalletAddress)
+	DelegateValidator  string        `yaml:"delegate_validator"`   // Override one-click delegation validator (default: operator of WalletAddress)
 	LookbackPeriodDays int           `yaml:"lookback_period_days"` // Days to look back for statistics (default 7)
 	StatsPeriodDays    int           `yaml:"stats_period_days"`    // Days to display in Network Statistics section (default 30)
 
@@ -422,6 +424,17 @@ func (s *Server) handleRoot(w http.ResponseWriter, r *http.Request) {
 	// Derive addresses and moniker from wallet
 	ourReporterAddr := s.cfg.WalletAddress
 	ourValidatorAddr := cryptoaddr.ToValidatorOperator(s.cfg.WalletAddress)
+
+	// One-click delegation target. Defaults to the operator's own reporter/validator; the
+	// env overrides let the flow be tested against a low-min reporter with a small stake.
+	delegateReporterAddr := ourReporterAddr
+	if s.cfg.DelegateReporter != "" {
+		delegateReporterAddr = s.cfg.DelegateReporter
+	}
+	delegateValidatorAddr := ourValidatorAddr
+	if s.cfg.DelegateValidator != "" {
+		delegateValidatorAddr = s.cfg.DelegateValidator
+	}
 	ourMoniker := ""
 	if reporter, ok := reporters[s.cfg.WalletAddress]; ok && reporter != nil && reporter.Metadata != nil {
 		ourMoniker = reporter.Metadata.Moniker
@@ -461,8 +474,8 @@ func (s *Server) handleRoot(w http.ResponseWriter, r *http.Request) {
 		"TotalValidating":   rewardStats.TotalValidating,
 		"OurValidating":     rewardStats.OurValidating,
 		"OurMoniker":        ourMoniker,
-		"OurReporterAddr":   ourReporterAddr,
-		"OurValidatorAddr":  ourValidatorAddr,
+		"OurReporterAddr":   delegateReporterAddr,
+		"OurValidatorAddr":  delegateValidatorAddr,
 		"OperatorStartYear": OperatorStartYear,
 		"ExperienceYears":   experienceYears,
 		"LayerAPIURL":       s.cfg.PublicAPIURL,
@@ -953,6 +966,19 @@ type ValidatorTree struct {
 	// Nested reporters under this validator
 	Reporters    []ReporterTree
 	HasReporters bool
+	// Delegators lists every staking delegator to this validator, regardless of which
+	// reporter (if any) they selected. Populated only for our validator, so a stake
+	// delegated to us still shows even when the selector picked a different reporter.
+	Delegators    []DelegatorTree
+	HasDelegators bool
+}
+
+// DelegatorTree is a raw staking delegator to a validator, independent of reporter
+// selection. Reporter is the reporter that delegator selected, or "" (none).
+type DelegatorTree struct {
+	ShortAddress string
+	Stake        string
+	Reporter     string
 }
 
 // ReporterTree represents a reporter under a validator for display.
@@ -1000,6 +1026,16 @@ type CachedValidatorTree struct {
 	Jailed          bool                 `json:"jailed"`
 	Reporters       []CachedReporterTree `json:"reporters"`
 	HasReporters    bool                 `json:"has_reporters"`
+	Delegators      []CachedDelegator    `json:"delegators,omitempty"`
+	HasDelegators   bool                 `json:"has_delegators,omitempty"`
+}
+
+// CachedDelegator is a JSON-serializable staking delegator to a validator, independent of
+// reporter selection.
+type CachedDelegator struct {
+	ShortAddress string `json:"short_address"`
+	Stake        string `json:"stake"`
+	Reporter     string `json:"reporter"`
 }
 
 // CachedReporterTree is a JSON-serializable version of ReporterTree.
@@ -1216,6 +1252,30 @@ func (s *Server) buildValidatorTree(ctx context.Context) []ValidatorTree {
 		// Set validator jailed status from SDK data
 		if validators[i].Validator != nil {
 			validators[i].Jailed = validators[i].Validator.Jailed
+		}
+
+		// For our validator, list its direct Delegations: delegators to the validator that
+		// did NOT select our reporter. Those that did appear under our reporter's own
+		// Delegations, so listing them here too would duplicate. This surfaces stake
+		// delegated to us that selected a different reporter (or none), e.g. a test wallet.
+		if validators[i].Validator != nil && validators[i].Validator.OperatorAddress == ourValidatorAddr {
+			for _, d := range s.fetchValidatorDelegators(ctx, ourValidatorAddr) {
+				addr := d.Delegation.DelegatorAddress
+				rep := s.fetchSelectorReporter(ctx, addr)
+				if rep == ourReporterAddr {
+					continue
+				}
+				repLabel := "none"
+				if rep != "" {
+					repLabel = truncateAddress(rep)
+				}
+				validators[i].Delegators = append(validators[i].Delegators, DelegatorTree{
+					ShortAddress: truncateAddress(addr),
+					Stake:        formatLoya(d.Balance.Amount.Uint64()),
+					Reporter:     repLabel,
+				})
+			}
+			validators[i].HasDelegators = len(validators[i].Delegators) > 0
 		}
 
 		// Populate missed blocks for validator from Prometheus metrics
@@ -1691,6 +1751,68 @@ func (s *Server) fetchDelegationsForSelector(ctx context.Context, selectorAddr s
 	return delegations
 }
 
+// fetchValidatorDelegators returns every staking delegator to a validator (loya balances),
+// using the same failover-over-LayerAPIURLs pattern as the other staking queries.
+func (s *Server) fetchValidatorDelegators(ctx context.Context, valoper string) []stakingtypes.DelegationResponse {
+	var out []stakingtypes.DelegationResponse
+	for _, baseURL := range s.cfg.LayerAPIURLs {
+		url := fmt.Sprintf("%s/cosmos/staking/v1beta1/validators/%s/delegations?pagination.limit=1000", baseURL, valoper)
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+		if err != nil {
+			continue
+		}
+		resp, err := s.httpClient.Do(req)
+		if err != nil {
+			continue
+		}
+		body, readErr := io.ReadAll(resp.Body)
+		_ = resp.Body.Close()
+		if readErr != nil || resp.StatusCode != http.StatusOK {
+			continue
+		}
+		var result stakingtypes.QueryValidatorDelegationsResponse
+		if err := s.cdc.UnmarshalJSON(body, &result); err != nil {
+			continue
+		}
+		for _, d := range result.DelegationResponses {
+			if d.Balance.Denom == "loya" {
+				out = append(out, d)
+			}
+		}
+		if len(out) > 0 {
+			return out
+		}
+	}
+	return out
+}
+
+// fetchSelectorReporter returns the reporter a selector has selected, or "" if none.
+func (s *Server) fetchSelectorReporter(ctx context.Context, selector string) string {
+	for _, baseURL := range s.cfg.LayerAPIURLs {
+		url := fmt.Sprintf("%s/tellor-io/layer/reporter/selector-reporter/%s", baseURL, selector)
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+		if err != nil {
+			continue
+		}
+		resp, err := s.httpClient.Do(req)
+		if err != nil {
+			continue
+		}
+		body, readErr := io.ReadAll(resp.Body)
+		_ = resp.Body.Close()
+		if readErr != nil || resp.StatusCode != http.StatusOK {
+			continue
+		}
+		var out struct {
+			Reporter string `json:"reporter"`
+		}
+		if err := json.Unmarshal(body, &out); err == nil && out.Reporter != "" {
+			return out.Reporter
+		}
+	}
+	return ""
+}
+
 // refreshTreeCache rebuilds the validator tree cache in-memory.
 func (s *Server) refreshTreeCache(ctx context.Context) ([]ValidatorTree, time.Time) {
 	s.cacheMu.Lock()
@@ -1915,7 +2037,13 @@ func toCachedTree(tree []ValidatorTree) []CachedValidatorTree {
 			Status:          v.Status,
 			Jailed:          v.Jailed,
 			HasReporters:    v.HasReporters,
+			HasDelegators:   v.HasDelegators,
 			Reporters:       make([]CachedReporterTree, len(v.Reporters)),
+		}
+		for _, d := range v.Delegators {
+			cached[i].Delegators = append(cached[i].Delegators, CachedDelegator{
+				ShortAddress: d.ShortAddress, Stake: d.Stake, Reporter: d.Reporter,
+			})
 		}
 		if v.Validator != nil {
 			cached[i].OperatorAddress = v.Validator.OperatorAddress

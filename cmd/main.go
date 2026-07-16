@@ -244,6 +244,8 @@ func runMonitor(cmd *cobra.Command, _ []string) {
 		PublicAPIURL:       cfg.publicAPIURL,
 		ExplorerURL:        cfg.explorerURL,
 		WalletAddress:      walletAddress,
+		DelegateReporter:   cfg.delegateReporter,
+		DelegateValidator:  cfg.delegateValidator,
 		LookbackPeriodDays: cfg.backfillLookback,
 		StatsPeriodDays:    web.DefaultStatsPeriodDays,
 		TLSDomain:          cfg.domain,
@@ -344,6 +346,8 @@ type monitorConfig struct {
 	publicRPCURL        string
 	publicAPIURL        string
 	explorerURL         string
+	delegateReporter    string
+	delegateValidator   string
 	signer              signerclient.Config
 }
 
@@ -376,9 +380,19 @@ func parseMonitorConfig() (monitorConfig, error) {
 		}
 	}
 
-	cfg.publicRPCURL = firstPublicURL(nodesStr)
-	cfg.publicAPIURL = firstPublicURL(apiURLsStr)
+	// Public RPC/REST URLs used by the browser (Keplr chain suggest + delegation fetches).
+	// These must be browser-reachable HTTPS endpoints, so PUBLIC_RPC_URL / PUBLIC_API_URL
+	// take precedence; the internal RPC_NODES / API_URLS (used server-side) are only a
+	// fallback and are usually not reachable from a browser.
+	cfg.publicRPCURL = getEnv("PUBLIC_RPC_URL", firstPublicURL(nodesStr))
+	cfg.publicAPIURL = getEnv("PUBLIC_API_URL", firstPublicURL(apiURLsStr))
 	cfg.explorerURL = os.Getenv("EXPLORER_URL")
+
+	// Optional overrides for the one-click delegation target. Default (empty) uses the
+	// operator's own reporter/validator. Point these at a low-min reporter to exercise the
+	// delegation flow with a small stake; leave unset in production.
+	cfg.delegateReporter = os.Getenv("DELEGATE_REPORTER_ADDR")
+	cfg.delegateValidator = os.Getenv("DELEGATE_VALIDATOR_ADDR")
 
 	// Remote signer connection (optional). When REMOTE_SIGNER_ADDR is set the
 	// monitor queries the signer for the reporter wallet address at startup;

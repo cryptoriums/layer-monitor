@@ -136,6 +136,35 @@ const Long = {
             </div>
           </div>`;
 
+      // Delegators to this validator (those that did not select our reporter; the ones that
+      // did appear under that reporter below). Shown as addresses indented under the validator.
+      if (v.has_delegators && v.delegators && v.delegators.length > 0) {
+        html += `
+          <div class="tree-reporters-container">
+            <div class="tree-selectors-container">`;
+        for (let dIdx = 0; dIdx < v.delegators.length; dIdx++) {
+          const d = v.delegators[dIdx];
+          const isLastDel = dIdx === v.delegators.length - 1;
+          html += `
+                <div class="tree-selector-group ${isLastDel ? 'tree-last' : ''}">
+                  <div class="tree-line-horizontal"></div>
+                  <div class="tree-selector-card">
+                    <span class="tree-selector-dot"></span>
+                    <span class="tree-selector-name" title="selected reporter: ${escapeHtml(d.reporter)}">${escapeHtml(d.short_address)}</span>
+                    <div class="tree-selector-stats">
+                      <span class="tree-stat-value-inline">-</span>
+                      <span class="tree-stat-value-inline">${escapeHtml(d.stake)}</span>
+                      <span class="tree-stat-value-inline tree-stat-rewards">-</span>
+                      <span class="tree-stat-value-inline">-</span>
+                    </div>
+                  </div>
+                </div>`;
+        }
+        html += `
+            </div>
+          </div>`;
+      }
+
       // Reporters
       if (hasReporters) {
         html += '<div class="tree-reporters-container">';
@@ -177,7 +206,7 @@ const Long = {
                 </div>
               </div>`;
 
-          // Selectors
+          // Delegations (the reporter's selectors)
           if (hasSelectors) {
             html += '<div class="tree-selectors-container">';
             for (let sIdx = 0; sIdx < r.selectors.length; sIdx++) {
@@ -315,6 +344,45 @@ function handleAmountInput(e) {
   input.value = value;
 }
 
+// Cached reporter minimum selector stake, in loya. null = not yet known / unavailable.
+let REPORTER_MIN_LOYA = null;
+
+// Fetch the reporter's on-chain min_tokens_required (loya) from the REST API.
+// Returns a number, or null when it cannot be determined (validation is then skipped
+// and the chain remains the source of truth). Result is cached after the first call.
+async function fetchReporterMinLoya() {
+  if (REPORTER_MIN_LOYA !== null) {
+    return REPORTER_MIN_LOYA;
+  }
+  if (!/^https?:\/\//.test(LAYER_CHAIN_INFO.rest || '')) {
+    return null;
+  }
+  try {
+    const resp = await fetch(`${LAYER_CHAIN_INFO.rest}/tellor-io/layer/reporter/reporters`);
+    if (!resp.ok) {
+      return null;
+    }
+    const data = await resp.json();
+    for (const r of (data.reporters || [])) {
+      if (r.address !== REPORTER_ADDR) {
+        continue;
+      }
+      const min = parseInt((r.metadata || {}).min_tokens_required || '0', 10);
+      REPORTER_MIN_LOYA = Number.isFinite(min) && min > 0 ? min : null;
+      return REPORTER_MIN_LOYA;
+    }
+    return null;
+  } catch (e) {
+    console.log('Could not fetch reporter minimum:', e.message);
+    return null;
+  }
+}
+
+// Format a loya amount as a trimmed TRB string (e.g. 10000000 -> "10").
+function loyaToTRBString(loya) {
+  return String(loya / Math.pow(10, DECIMALS));
+}
+
 // Open delegation modal
 async function openDelegateModal() {
   const modal = document.getElementById('delegateModal');
@@ -355,9 +423,14 @@ async function loadStakeInfo() {
     return;
   }
 
+  const minLoya = await fetchReporterMinLoya();
+  const minNote = minLoya
+    ? `<div style="margin-top: 8px; color: #fbbf24;">This reporter requires more than <strong>${loyaToTRBString(minLoya)} TRB</strong> to select. Stake a little above it to cover staking rounding.</div>`
+    : '';
   stakeInfoDiv.innerHTML = `
     <div style="text-align: center; padding: 10px; color: #94a3b8;">
       Enter the amount of TRB to delegate to our validator and select our reporter.
+      ${minNote}
     </div>
   `;
 }
@@ -413,6 +486,14 @@ async function executeDelegation() {
       confirmBtn.disabled = true;
       confirmBtn.innerHTML = 'Confirm';
       return;
+    }
+
+    // Guard: Keplr's chain-suggest and the delegation fetches need public, browser
+    // reachable HTTPS endpoints. If they are not configured, fail with a clear message
+    // instead of suggesting an empty rpc to Keplr or fetching HTML (which then hits the
+    // "Unexpected token '<'" JSON parse error).
+    if (!/^https?:\/\//.test(LAYER_CHAIN_INFO.rpc || '') || !/^https?:\/\//.test(LAYER_CHAIN_INFO.rest || '')) {
+      throw new Error('Chain endpoints not configured: the monitor has no public RPC/REST URL. Ask the operator to set PUBLIC_RPC_URL and PUBLIC_API_URL.');
     }
 
     console.log("=== DELEGATION DEBUG START ===");
@@ -475,14 +556,50 @@ async function executeDelegation() {
     console.log("[7] Parsed account_number:", accountNumber);
     console.log("[7] Parsed sequence:", sequence);
 
-    // Build proto messages
-    const msgDelegate = encodeMsgDelegate(sender, VALIDATOR_ADDR, DENOM, amountInLoya);
-    const msgSelectReporter = encodeMsgSelectReporter(sender, REPORTER_ADDR);
+    // A selector can select only one reporter, so re-selecting fails on-chain with
+    // "selector already exists" and reverts the whole tx. Check the wallet's current
+    // selection and adapt: add-stake-only if it already selects this reporter, block if
+    // it selects a different one, otherwise delegate + select as a first-time delegator.
+    let alreadySelectsTarget = false;
+    try {
+      const selResp = await fetch(`${LAYER_CHAIN_INFO.rest}/tellor-io/layer/reporter/selector-reporter/${sender}`);
+      if (selResp.ok) {
+        const current = (await selResp.json()).reporter || '';
+        console.log("[7b] Current reporter selection:", current || "(none)");
+        if (current === REPORTER_ADDR) {
+          alreadySelectsTarget = true;
+        } else if (current) {
+          showStatus('This wallet already selects a different reporter. Switch or unselect it first, then delegate here.', true);
+          setButtonLoading(confirmBtn, false, 'Confirm');
+          return;
+        }
+      }
+    } catch (e) {
+      console.log("[7b] Selection check failed, treating as new selection:", e.message);
+    }
 
-    const encodedMsgs = [
-      encodeAny("/cosmos.staking.v1beta1.MsgDelegate", msgDelegate),
-      encodeAny("/layer.reporter.MsgSelectReporter", msgSelectReporter)
-    ];
+    // The reporter's on-chain minimum only applies when selecting for the first time
+    // (strict ">" because staking rounds down ~1 loya). Adding to an existing selection
+    // has no minimum, so skip the check then.
+    if (!alreadySelectsTarget) {
+      const minLoya = await fetchReporterMinLoya();
+      if (minLoya && Math.floor(amount * Math.pow(10, DECIMALS)) <= minLoya) {
+        showStatus(`This reporter requires more than ${loyaToTRBString(minLoya)} TRB. Please enter a bit more than ${loyaToTRBString(minLoya)} TRB.`, true);
+        setButtonLoading(confirmBtn, false, 'Confirm');
+        return;
+      }
+    }
+
+    // Build proto messages. Always delegate; only add the select message when this wallet
+    // is not already selecting the target reporter.
+    const msgDelegate = encodeMsgDelegate(sender, VALIDATOR_ADDR, DENOM, amountInLoya);
+    const encodedMsgs = [encodeAny("/cosmos.staking.v1beta1.MsgDelegate", msgDelegate)];
+    if (!alreadySelectsTarget) {
+      const msgSelectReporter = encodeMsgSelectReporter(sender, REPORTER_ADDR);
+      encodedMsgs.push(encodeAny("/layer.reporter.MsgSelectReporter", msgSelectReporter));
+    } else {
+      console.log("[8] Already selecting this reporter; delegate-only (adding stake).");
+    }
 
     // Build TxBody
     const bodyBytes = encodeTxBody(encodedMsgs, "");
