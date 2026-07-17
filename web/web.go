@@ -2041,9 +2041,7 @@ func toCachedTree(tree []ValidatorTree) []CachedValidatorTree {
 			Reporters:       make([]CachedReporterTree, len(v.Reporters)),
 		}
 		for _, d := range v.Delegators {
-			cached[i].Delegators = append(cached[i].Delegators, CachedDelegator{
-				ShortAddress: d.ShortAddress, Stake: d.Stake, Reporter: d.Reporter,
-			})
+			cached[i].Delegators = append(cached[i].Delegators, CachedDelegator(d))
 		}
 		if v.Validator != nil {
 			cached[i].OperatorAddress = v.Validator.OperatorAddress
