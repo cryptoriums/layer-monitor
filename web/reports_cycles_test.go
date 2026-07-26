@@ -308,17 +308,49 @@ func TestGetMissedCyclesPerReporterFromDB_MoreReportsThanCycles(t *testing.T) {
 		insertCycleRotation(t, db, int64(100+i), fmt.Sprintf("queryid%d", i), now.Add(-time.Hour*time.Duration(i)))
 	}
 
-	// Reporter submits 8 cyclelist reports (more than cycles)
-	// This can happen if reporter submits multiple reports per cycle
+	// Reporter submits 8 cyclelist reports (more than cycles): block numbers 100..107 all
+	// fall on or after the 5 rotation boundaries (100..104), so every cycle is covered.
 	for i := 0; i < 8; i++ {
 		insertReport(t, db, reporter, fmt.Sprintf("queryid%d", i%5), now.Add(-time.Minute*time.Duration(i)), 1, int64(100+i))
 	}
 
 	result, _ := server.getMissedCyclesPerReporterFromDB(ctx)
 
-	// Missed should be clamped to 0 (5 cycles - 8 reports = -3, but clamped to 0)
+	// All 5 cycles covered -> 0 missed (extra reports within cycles do not go negative).
 	require.Contains(t, result, reporter)
-	assert.Equal(t, int64(0), result[reporter], "missed cycles should be clamped to 0 when reports > cycles")
+	assert.Equal(t, int64(0), result[reporter], "covering every cycle should yield 0 missed regardless of report count")
+}
+
+// The regression this whole change is about: a reporter that submits SEVERAL reports in the
+// few cycles it does cover, while missing the rest. The old "cycles - report_count" formula
+// let the extra reports cancel the misses (showing a falsely low miss rate); counting
+// distinct covered cycles reports the real number.
+func TestGetMissedCyclesPerReporterFromDB_MultipleReportsPerCycleDoNotHideMisses(t *testing.T) {
+	ctx := context.Background()
+	db := setupWebTestDB(t)
+	server := newTestServer(db, DefaultLookbackPeriodDays)
+
+	now := time.Now().UTC()
+	reporter := "tellor1reporterBursty"
+
+	// 10 cycles at heights 100..109.
+	for i := 0; i < 10; i++ {
+		insertCycleRotation(t, db, int64(100+i), fmt.Sprintf("queryid%d", i), now.Add(-time.Hour*time.Duration(i)))
+	}
+
+	// Reporter covers only cycles 100, 101, 102 but submits 5 reports inside EACH of them
+	// (block numbers land in [100,101), [101,102), [102,103)). That is 15 reports total.
+	for _, h := range []int64{100, 101, 102} {
+		for j := 0; j < 5; j++ {
+			insertReport(t, db, reporter, "queryid", now.Add(-time.Minute*time.Duration(h)), 1, h)
+		}
+	}
+
+	result, _ := server.getMissedCyclesPerReporterFromDB(ctx)
+
+	// Only 3 of 10 cycles covered -> 7 missed. The old formula gave 10-15 -> clamped 0.
+	require.Contains(t, result, reporter)
+	assert.Equal(t, int64(7), result[reporter], "multiple reports per cycle must not hide missed cycles")
 }
 
 func TestGetMissedCyclesPerReporterFromDB_ZeroLookbackDays(t *testing.T) {

@@ -1883,12 +1883,13 @@ func (s *Server) getMissedCyclesPerReporterFromDBForPeriod(ctx context.Context, 
 	}
 	minutes := periodDays * 24 * 60
 
-	// Get total cycle rotations in lookback period
+	// Total number of distinct cycles (rotation boundaries) in the lookback window.
+	// uniqExact guards against duplicate rotation rows from block reprocessing.
 	cyclesQuery := fmt.Sprintf(`
-		SELECT COUNT(*) as total_cycles
+		SELECT uniqExact(%s) as total_cycles
 		FROM %s
 		WHERE %s >= now() - INTERVAL %d MINUTE
-	`, blockdb.TableNameCycleRotations, blockdb.ColTimestamp, minutes)
+	`, blockdb.ColBlockHeight, blockdb.TableNameCycleRotations, blockdb.ColTimestamp, minutes)
 
 	var totalCycles int64
 	rows, err := s.db.Query(ctx, cyclesQuery)
@@ -1905,32 +1906,58 @@ func (s *Server) getMissedCyclesPerReporterFromDBForPeriod(ctx context.Context, 
 		return result, 0
 	}
 
-	// Get reports count per reporter (only cyclelist reports)
-	reportsQuery := fmt.Sprintf(`
-		SELECT %s, COUNT(*) as report_count
-		FROM %s
-		WHERE %s >= now() - INTERVAL %d MINUTE
-		  AND %s = 1
-		GROUP BY %s
-	`, blockdb.ColReporter, blockdb.TableNameReports,
-		blockdb.ColTimestamp, minutes, blockdb.ColCyclelist, blockdb.ColReporter)
+	// Count the DISTINCT cycles each reporter actually covered. Each cyclelist report is
+	// attributed to the cycle active at its block height (the greatest rotation boundary at
+	// or below the report's block number) via an ASOF join, then de-duplicated per reporter.
+	// De-duplicating per cycle keeps the metric honest: several reports inside one cycle count
+	// once, so extra reports can no longer cancel out genuinely missed cycles. The ASOF join is
+	// O(n log m) — a plain CROSS JOIN here is O(reports * cycles) and times out on wide ranges
+	// (~17k cycles * ~220k reports/day), which showed up as 100% missed for everyone.
+	coveredQuery := fmt.Sprintf(`
+		SELECT reporter, uniqExact(cycle_start) as covered
+		FROM (
+			SELECT rep.reporter AS reporter, cyc.block_height AS cycle_start
+			FROM (
+				SELECT %[1]s AS reporter, %[2]s AS bn, 1 AS k
+				FROM %[3]s
+				WHERE %[4]s = 1
+				  AND %[5]s >= now() - INTERVAL %[6]d MINUTE
+			) AS rep
+			ASOF INNER JOIN (
+				SELECT %[7]s AS block_height, 1 AS k
+				FROM %[8]s
+				WHERE %[5]s >= now() - INTERVAL %[6]d MINUTE
+			) AS cyc
+			ON rep.k = cyc.k AND rep.bn >= cyc.block_height
+		)
+		GROUP BY reporter
+	`,
+		blockdb.ColReporter,             // 1
+		blockdb.ColBlockNumber,          // 2
+		blockdb.TableNameReports,        // 3
+		blockdb.ColCyclelist,            // 4
+		blockdb.ColTimestamp,            // 5
+		minutes,                         // 6
+		blockdb.ColBlockHeight,          // 7
+		blockdb.TableNameCycleRotations, // 8
+	)
 
-	rows, err = s.db.Query(ctx, reportsQuery)
+	rows, err = s.db.Query(ctx, coveredQuery)
 	if err != nil {
-		s.logger.Debug("failed to query reports count for map", "error", err)
+		s.logger.Debug("failed to query covered cycles for map", "error", err)
 		return result, totalCycles
 	}
 	defer func() { _ = rows.Close() }()
 
 	for rows.Next() {
 		var reporter string
-		var reportCount int64
-		if err := rows.Scan(&reporter, &reportCount); err != nil {
+		var covered int64
+		if err := rows.Scan(&reporter, &covered); err != nil {
 			continue
 		}
 
-		// Simple calculation: missed = total cycles - reports submitted
-		missed := totalCycles - reportCount
+		// missed = total cycles - distinct cycles the reporter covered.
+		missed := totalCycles - covered
 		if missed < 0 {
 			missed = 0
 		}
