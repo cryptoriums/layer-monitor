@@ -77,10 +77,11 @@ type Server struct {
 	cdc        *codec.ProtoCodec
 
 	// Cache for validator tree (refreshed every hour or on demand)
-	cacheMu         sync.RWMutex
-	cachedTree      []ValidatorTree
-	cacheTimestamp  time.Time
-	cacheRefreshing bool
+	cacheMu           sync.RWMutex
+	cachedTree        []ValidatorTree
+	cacheTimestamp    time.Time
+	cacheRefreshing   bool
+	cachedRewardStats map[int]NetworkRewardStats // per-period network reward stats, refreshed with the tree
 
 	// ctx is the server's root context, stored for background operations (e.g. cache refresh).
 	ctx context.Context
@@ -418,8 +419,14 @@ func (s *Server) handleRoot(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Get network reward statistics for the stats display period
-	rewardStats := s.queryNetworkRewardStats(ctx, periodDays)
+	// Get network reward statistics for the stats display period (served from cache; the
+	// background refresh pre-computes all periods so this doesn't scan rewards per request).
+	s.cacheMu.RLock()
+	rewardStats, statsCached := s.cachedRewardStats[periodDays]
+	s.cacheMu.RUnlock()
+	if !statsCached {
+		rewardStats = s.queryNetworkRewardStats(ctx, periodDays)
+	}
 
 	// Derive addresses and moniker from wallet
 	ourReporterAddr := s.cfg.WalletAddress
@@ -650,65 +657,38 @@ type NetworkRewardStats struct {
 
 // queryNetworkRewardStats aggregates reporting and validating rewards for the stats display period.
 func (s *Server) queryNetworkRewardStats(ctx context.Context, periodDays int) NetworkRewardStats {
-	queryTotal := func(rewardType string) uint64 {
-		q := fmt.Sprintf(`
-			SELECT coalesce(sum(toFloat64(%s)), 0) AS total
-			FROM %s
-			WHERE %s = ?
-			  AND %s >= now() - INTERVAL %d DAY
-		`, blockdb.ColAmount, blockdb.TableNameRewards,
-			blockdb.ColType,
-			blockdb.ColBlockTime, periodDays)
-
-		rows, err := s.db.Query(ctx, q, rewardType)
-		if err != nil {
-			s.logger.Error("failed to query total rewards", "reward_type", rewardType, "error", err)
-			return 0
-		}
-		defer func() { _ = rows.Close() }()
-		var total float64
-		if rows.Next() {
-			_ = rows.Scan(&total)
-		}
-		return uint64(total)
-	}
-
-	queryOurs := func(rewardType, addr string) uint64 {
-		if addr == "" {
-			return 0
-		}
-		q := fmt.Sprintf(`
-			SELECT coalesce(sum(toFloat64(%s)), 0) AS total
-			FROM %s
-			WHERE %s = ?
-			  AND %s = ?
-			  AND %s >= now() - INTERVAL %d DAY
-		`, blockdb.ColAmount, blockdb.TableNameRewards,
-			blockdb.ColRecipient,
-			blockdb.ColType,
-			blockdb.ColBlockTime, periodDays)
-
-		rows, err := s.db.Query(ctx, q, addr, rewardType)
-		if err != nil {
-			s.logger.Error("failed to query our rewards", "reward_type", rewardType, "error", err)
-			return 0
-		}
-		defer func() { _ = rows.Close() }()
-		var total float64
-		if rows.Next() {
-			_ = rows.Scan(&total)
-		}
-		return uint64(total)
-	}
-
 	ourReporterAddr := s.cfg.WalletAddress
 	ourValidatorAddr := cryptoaddr.ToValidatorOperator(s.cfg.WalletAddress)
 
+	// One scan over the period computes all four sums via conditional aggregation, instead of
+	// four separate full-table scans of the rewards table.
+	q := fmt.Sprintf(`
+		SELECT
+			coalesce(sumIf(toFloat64(%[1]s), %[3]s = '%[5]s'), 0),
+			coalesce(sumIf(toFloat64(%[1]s), %[3]s = '%[5]s' AND %[4]s = ?), 0),
+			coalesce(sumIf(toFloat64(%[1]s), %[3]s = '%[6]s'), 0),
+			coalesce(sumIf(toFloat64(%[1]s), %[3]s = '%[6]s' AND %[4]s = ?), 0)
+		FROM %[2]s
+		WHERE %[7]s >= now() - INTERVAL %[8]d DAY
+	`, blockdb.ColAmount, blockdb.TableNameRewards, blockdb.ColType, blockdb.ColRecipient,
+		blockdb.RewardTypeReporterTip, blockdb.RewardTypeValidatorDelegator,
+		blockdb.ColBlockTime, periodDays)
+
+	rows, err := s.db.Query(ctx, q, ourReporterAddr, ourValidatorAddr)
+	if err != nil {
+		s.logger.Error("failed to query network reward stats", "error", err)
+		return NetworkRewardStats{}
+	}
+	defer func() { _ = rows.Close() }()
+	var totalReporting, ourReporting, totalValidating, ourValidating float64
+	if rows.Next() {
+		_ = rows.Scan(&totalReporting, &ourReporting, &totalValidating, &ourValidating)
+	}
 	return NetworkRewardStats{
-		TotalReporting:  formatLoya(queryTotal(blockdb.RewardTypeReporterTip)),
-		OurReporting:    formatLoya(queryOurs(blockdb.RewardTypeReporterTip, ourReporterAddr)),
-		TotalValidating: formatLoya(queryTotal(blockdb.RewardTypeValidatorDelegator)),
-		OurValidating:   formatLoya(queryOurs(blockdb.RewardTypeValidatorDelegator, ourValidatorAddr)),
+		TotalReporting:  formatLoya(uint64(totalReporting)),
+		OurReporting:    formatLoya(uint64(ourReporting)),
+		TotalValidating: formatLoya(uint64(totalValidating)),
+		OurValidating:   formatLoya(uint64(ourValidating)),
 	}
 }
 
@@ -1830,6 +1810,13 @@ func (s *Server) refreshTreeCache(ctx context.Context) ([]ValidatorTree, time.Ti
 	// Build the tree (this can take a while)
 	startTime := time.Now()
 	tree := s.buildValidatorTree(ctx)
+
+	// Pre-compute the network reward stats for each selectable period so page loads serve
+	// them from cache instead of running the (uncached, unindexed) rewards scans per request.
+	rewardStats := make(map[int]NetworkRewardStats, 3)
+	for _, p := range []int{1, 7, 30} {
+		rewardStats[p] = s.queryNetworkRewardStats(ctx, p)
+	}
 	duration := time.Since(startTime)
 
 	s.logger.Info("validator tree cache refreshed", "duration", duration, "validators", len(tree))
@@ -1837,6 +1824,7 @@ func (s *Server) refreshTreeCache(ctx context.Context) ([]ValidatorTree, time.Ti
 	// Update in-memory cache
 	s.cacheMu.Lock()
 	s.cachedTree = tree
+	s.cachedRewardStats = rewardStats
 	s.cacheTimestamp = time.Now()
 	s.cacheRefreshing = false
 	timestamp := s.cacheTimestamp
