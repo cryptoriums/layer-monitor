@@ -1080,6 +1080,11 @@ func (s *Server) buildValidatorTree(ctx context.Context) []ValidatorTree {
 	}
 	s.logger.Info("buildValidatorTree: reporters fetched", "count", len(reporterMap))
 
+	// Pre-fetch every reporter's selections ONCE, concurrently. Previously
+	// fetchSelectionsForReporter ran sequentially and twice per reporter, which
+	// dominated page build time (~20s for ~57 reporters).
+	selectionsByReporter := s.fetchAllSelectionsConcurrent(ctx, reporterMap)
+
 	// Build a map of validator operator address -> validator index
 	validatorIndex := make(map[string]int)
 	for i := range validators {
@@ -1108,7 +1113,7 @@ func (s *Server) buildValidatorTree(ctx context.Context) []ValidatorTree {
 
 		// Get all validators the reporter has staked to (from all their selections)
 		stakedValidators := make(map[int]bool)
-		selections := s.fetchSelectionsForReporter(ctx, reporterAddr)
+		selections := selectionsByReporter[reporterAddr]
 		for _, sel := range selections {
 			if len(sel.IndividualDelegations) > 0 {
 				for _, del := range sel.IndividualDelegations {
@@ -1206,7 +1211,7 @@ func (s *Server) buildValidatorTree(ctx context.Context) []ValidatorTree {
 		reporterNode := s.findOrCreateReporterTree(homeValidator, reporter)
 
 		// Fetch all selectors for this reporter
-		selections := s.fetchSelectionsForReporter(ctx, reporterAddr)
+		selections := selectionsByReporter[reporterAddr]
 		for _, sel := range selections {
 			// Calculate total stake for this selector across all validators
 			var totalStake uint64
@@ -1648,6 +1653,30 @@ func (s *Server) fetchReporters(ctx context.Context) map[string]*reportertypes.R
 	}
 
 	return reporters
+}
+
+// fetchAllSelectionsConcurrent fetches selections for every reporter in parallel
+// (bounded worker pool) and returns them keyed by reporter address. This replaces
+// the previous sequential, twice-per-reporter fetching that dominated build time.
+func (s *Server) fetchAllSelectionsConcurrent(ctx context.Context, reporterMap map[string]*reportertypes.Reporter) map[string][]*reportertypes.FormattedSelection {
+	result := make(map[string][]*reportertypes.FormattedSelection, len(reporterMap))
+	var mu sync.Mutex
+	var wg sync.WaitGroup
+	sem := make(chan struct{}, 16) // cap concurrent chain queries
+	for reporterAddr := range reporterMap {
+		wg.Add(1)
+		go func(addr string) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			sels := s.fetchSelectionsForReporter(ctx, addr)
+			mu.Lock()
+			result[addr] = sels
+			mu.Unlock()
+		}(reporterAddr)
+	}
+	wg.Wait()
+	return result
 }
 
 // fetchSelectionsForReporter fetches all selectors for a reporter.
