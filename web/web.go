@@ -1128,8 +1128,18 @@ func (s *Server) buildValidatorTree(ctx context.Context) []ValidatorTree {
 
 		matched := false
 
+		// Priority 0: reporter operates a validator under the same account.
+		// The reporter (tellor1…) and validator operator (tellorvaloper1…) share the
+		// same underlying bytes, so this is the most reliable link and is moniker-independent.
+		if valIdx, ok := validatorIndex[cryptoaddr.ToValidatorOperator(reporterAddr)]; ok {
+			reporterToValidator[reporterAddr] = valIdx
+			s.logger.Debug("reporter matched by operator address",
+				"reporter", reporterAddr, "validator", validators[valIdx].Moniker)
+			matched = true
+		}
+
 		// Priority 1: Match by moniker
-		if reporterMoniker != "" {
+		if !matched && reporterMoniker != "" {
 			if matchingValidators, ok := validatorsByMoniker[reporterMoniker]; ok && len(matchingValidators) > 0 {
 				// If multiple validators with same moniker, prefer one the reporter staked to
 				for _, valIdx := range matchingValidators {
