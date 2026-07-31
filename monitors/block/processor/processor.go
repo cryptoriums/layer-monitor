@@ -10,6 +10,7 @@ import (
 
 	abci "github.com/cometbft/cometbft/abci/types"
 	ctypes "github.com/cometbft/cometbft/types"
+	cryptoaddr "github.com/cryptoriums/layer-monitor/addr"
 	blockdb "github.com/cryptoriums/layer-monitor/db"
 	monitor "github.com/cryptoriums/layer-monitor/metrics"
 	"github.com/prometheus/client_golang/prometheus"
@@ -70,15 +71,10 @@ type bufferedBlockSign struct {
 	blockTime   time.Time
 	validator   string
 	signed      uint8
-}
-
-// bufferedVoteExtSig is one operator's signature on a vote-extension payload at
-// a given height, buffered for batch insert.
-type bufferedVoteExtSig struct {
-	blockHeight int64
-	blockTime   time.Time
-	operator    string
-	sigType     string
+	// sigType is which kind of signature this row records: consensus precommit,
+	// valset checkpoint or oracle attestation. Consensus rows carry a consensus
+	// address; the vote-extension rows carry an operator address.
+	sigType string
 }
 
 // bufferedReport represents a buffered oracle report for batch insert into the reports table.
@@ -163,12 +159,6 @@ type Processor struct {
 	blockSignBuffer []bufferedBlockSign
 	blockSignMtx    sync.Mutex
 
-	// Batch insert buffer for vote-extension signatures (valset checkpoints and
-	// oracle attestations), recorded per operator so participation can be
-	// measured per signature type and not only for consensus votes.
-	voteExtSigBuffer []bufferedVoteExtSig
-	voteExtSigMtx    sync.Mutex
-
 	// Batch insert buffer for oracle reports.
 	reportBuffer []bufferedReport
 	reportMtx    sync.Mutex
@@ -182,9 +172,10 @@ type Processor struct {
 	cycleRotationMtx    sync.Mutex
 
 	// The only two metrics this processor exposes, both for our own node:
-	//   missedBlocks  — block signatures our validator missed while in the active set
+	//   missedBlocks  — signatures our validator missed, labelled by sig type
+	//                   (consensus, valset_sig, oracle_attestation)
 	//   missedReports — reporter cycles our reporter missed
-	missedBlocks  prometheus.Counter
+	missedBlocks  *prometheus.CounterVec
 	missedReports prometheus.Counter
 }
 
@@ -220,12 +211,13 @@ func NewWithConfig(
 		// when multiple processors are created in tests.
 		cfg.Registerer = prometheus.NewRegistry()
 	}
-	p.missedBlocks = promauto.With(cfg.Registerer).NewCounter(prometheus.CounterOpts{
+	p.missedBlocks = promauto.With(cfg.Registerer).NewCounterVec(prometheus.CounterOpts{
 		Namespace: monitor.MetricsNamespace,
 		Subsystem: "processor",
 		Name:      "missed_our_validator_blocks_total",
-		Help:      "Total block signatures our validator missed while in the active set",
-	})
+		Help: "Total signatures our validator missed, by type: consensus precommits, " +
+			"valset checkpoints and oracle attestations",
+	}, []string{"type"})
 	p.missedReports = promauto.With(cfg.Registerer).NewCounter(prometheus.CounterOpts{
 		Namespace: monitor.MetricsNamespace,
 		Subsystem: "processor",
@@ -755,13 +747,14 @@ func (p *Processor) flushBlockSigns(ctx context.Context) error {
 	var values []string
 	var args []any
 	for _, r := range records {
-		values = append(values, "(?, ?, ?, ?)")
-		args = append(args, r.blockHeight, r.blockTime, r.validator, r.signed)
+		values = append(values, "(?, ?, ?, ?, ?)")
+		args = append(args, r.blockHeight, r.blockTime, r.validator, r.signed, r.sigType)
 	}
 
-	query := fmt.Sprintf("INSERT INTO %s (%s, %s, %s, %s) VALUES %s",
+	query := fmt.Sprintf("INSERT INTO %s (%s, %s, %s, %s, %s) VALUES %s",
 		blockdb.TableNameBlockSigns,
 		blockdb.ColBlockHeight, blockdb.ColBlockTimestamp, blockdb.ColValidatorAddress, blockdb.ColSigned,
+		blockdb.ColSigType,
 		strings.Join(values, ", "))
 
 	insertCtx, cancel := context.WithTimeout(ctx, DefaultDBTimeout*10)
@@ -778,8 +771,9 @@ func (p *Processor) flushBlockSigns(ctx context.Context) error {
 }
 
 // recordVoteExtSigs buffers the operators that signed each vote-extension
-// payload at this height. Missing operators are not written: absence of a row
-// for a (height, sig_type) is what counts as a miss, mirroring block_signs.
+// payload at this height into the same block_signs buffer, tagged by sig_type.
+// Only signers are written: absence of a row for a (height, sig_type) is what
+// counts as a miss, exactly as for consensus rows.
 func (p *Processor) recordVoteExtSigs(voteExtTx *app.VoteExtTx, blockHeight int64, blockTime time.Time) {
 	sets := []struct {
 		sigType   string
@@ -789,56 +783,36 @@ func (p *Processor) recordVoteExtSigs(voteExtTx *app.VoteExtTx, blockHeight int6
 		{blockdb.SigTypeOracleAttestation, voteExtTx.OracleAttestations.OperatorAddresses},
 	}
 
-	p.voteExtSigMtx.Lock()
-	defer p.voteExtSigMtx.Unlock()
+	ourOperator := cryptoaddr.ToValidatorOperator(p.cfg.WalletAddress)
+
+	p.blockSignMtx.Lock()
+	defer p.blockSignMtx.Unlock()
 	for _, set := range sets {
+		if len(set.operators) == 0 {
+			// No payload of this kind at this height (valset checkpoints only
+			// appear on validator-set changes), so nobody could have missed it.
+			continue
+		}
+		ourSigFound := false
 		for _, op := range set.operators {
 			if op == "" {
 				continue
 			}
-			p.voteExtSigBuffer = append(p.voteExtSigBuffer, bufferedVoteExtSig{
+			if op == ourOperator {
+				ourSigFound = true
+			}
+			p.blockSignBuffer = append(p.blockSignBuffer, bufferedBlockSign{
 				blockHeight: blockHeight,
 				blockTime:   blockTime,
-				operator:    op,
+				validator:   op,
+				signed:      1,
 				sigType:     set.sigType,
 			})
 		}
+		if !ourSigFound && ourOperator != "" {
+			p.missedBlocks.WithLabelValues(set.sigType).Inc()
+		}
 	}
-}
-
-// flushVoteExtSigs writes buffered vote-extension signatures using batch INSERT.
-func (p *Processor) flushVoteExtSigs(ctx context.Context) error {
-	p.voteExtSigMtx.Lock()
-	if len(p.voteExtSigBuffer) == 0 {
-		p.voteExtSigMtx.Unlock()
-		return nil
-	}
-	records := p.voteExtSigBuffer
-	p.voteExtSigBuffer = nil
-	p.voteExtSigMtx.Unlock()
-
-	var values []string
-	var args []any
-	for _, r := range records {
-		values = append(values, "(?, ?, ?, ?)")
-		args = append(args, r.blockHeight, r.blockTime, r.operator, r.sigType)
-	}
-
-	query := fmt.Sprintf("INSERT INTO %s (%s, %s, %s, %s) VALUES %s",
-		blockdb.TableNameVoteExtSigs,
-		blockdb.ColBlockHeight, blockdb.ColBlockTimestamp, blockdb.ColOperatorAddress, blockdb.ColSigType,
-		strings.Join(values, ", "))
-
-	insertCtx, cancel := context.WithTimeout(ctx, DefaultDBTimeout*10)
-	defer cancel()
-
-	if _, err := p.db.Exec(insertCtx, query, args...); err != nil {
-		p.logger.Error("batch insert vote_ext_sigs failed", "count", len(records), "error", err)
-		return err
-	}
-
-	p.logger.Debug("batch inserted vote_ext_sigs", "count", len(records))
-	return nil
 }
 
 // flushReports writes buffered oracle reports to the database using batch INSERT.
@@ -958,9 +932,6 @@ func (p *Processor) Flush(ctx context.Context) error {
 	if err := p.flushBlockSigns(ctx); err != nil {
 		return err
 	}
-	if err := p.flushVoteExtSigs(ctx); err != nil {
-		return err
-	}
 	if err := p.flushReports(ctx); err != nil {
 		return err
 	}
@@ -1051,7 +1022,7 @@ func (p *Processor) insertBlockSigns(blockEv ctypes.EventDataNewBlock) {
 
 		// Log a warning if our validator missed signing while in the active set.
 		if validatorAddr == p.cfg.ValidatorConsensusAddress && signed == 0 {
-			p.missedBlocks.Inc()
+			p.missedBlocks.WithLabelValues(blockdb.SigTypeConsensus).Inc()
 			p.logger.Warn("our validator missed signing block", "height", commitHeight, "validator", validatorAddr)
 		}
 
@@ -1061,6 +1032,7 @@ func (p *Processor) insertBlockSigns(blockEv ctypes.EventDataNewBlock) {
 			blockTime:   blockTime,
 			validator:   validatorAddr,
 			signed:      signed,
+			sigType:     blockdb.SigTypeConsensus,
 		})
 		p.blockSignMtx.Unlock()
 	}
