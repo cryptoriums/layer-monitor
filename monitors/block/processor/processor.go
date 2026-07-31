@@ -15,6 +15,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
 	"github.com/shopspring/decimal"
+	"github.com/tellor-io/layer/app"
 	"github.com/tellor-io/layer/x/oracle/types"
 
 	"cosmossdk.io/log"
@@ -69,6 +70,15 @@ type bufferedBlockSign struct {
 	blockTime   time.Time
 	validator   string
 	signed      uint8
+}
+
+// bufferedVoteExtSig is one operator's signature on a vote-extension payload at
+// a given height, buffered for batch insert.
+type bufferedVoteExtSig struct {
+	blockHeight int64
+	blockTime   time.Time
+	operator    string
+	sigType     string
 }
 
 // bufferedReport represents a buffered oracle report for batch insert into the reports table.
@@ -152,6 +162,12 @@ type Processor struct {
 	// Batch insert buffer for block signatures.
 	blockSignBuffer []bufferedBlockSign
 	blockSignMtx    sync.Mutex
+
+	// Batch insert buffer for vote-extension signatures (valset checkpoints and
+	// oracle attestations), recorded per operator so participation can be
+	// measured per signature type and not only for consensus votes.
+	voteExtSigBuffer []bufferedVoteExtSig
+	voteExtSigMtx    sync.Mutex
 
 	// Batch insert buffer for oracle reports.
 	reportBuffer []bufferedReport
@@ -331,7 +347,10 @@ func (p *Processor) insertTx(blockEv ctypes.EventDataNewBlock) {
 		raw := txs[i]
 
 		if voteExtTx, ok := ParseVoteExtensionTx(raw); ok {
-			p.logger.Debug("skipping vote extension tx", "height", voteExtTx.BlockHeight)
+			// Vote extensions carry no fees/messages, so they are not decoded as
+			// normal txs, but they do tell us which operators signed the valset
+			// checkpoint and the oracle attestations at this height.
+			p.recordVoteExtSigs(voteExtTx, blockEv.Block.Height, blockEv.Block.Time)
 			continue
 		}
 
@@ -758,6 +777,70 @@ func (p *Processor) flushBlockSigns(ctx context.Context) error {
 	return nil
 }
 
+// recordVoteExtSigs buffers the operators that signed each vote-extension
+// payload at this height. Missing operators are not written: absence of a row
+// for a (height, sig_type) is what counts as a miss, mirroring block_signs.
+func (p *Processor) recordVoteExtSigs(voteExtTx *app.VoteExtTx, blockHeight int64, blockTime time.Time) {
+	sets := []struct {
+		sigType   string
+		operators []string
+	}{
+		{blockdb.SigTypeValsetSig, voteExtTx.ValsetSigs.OperatorAddresses},
+		{blockdb.SigTypeOracleAttestation, voteExtTx.OracleAttestations.OperatorAddresses},
+	}
+
+	p.voteExtSigMtx.Lock()
+	defer p.voteExtSigMtx.Unlock()
+	for _, set := range sets {
+		for _, op := range set.operators {
+			if op == "" {
+				continue
+			}
+			p.voteExtSigBuffer = append(p.voteExtSigBuffer, bufferedVoteExtSig{
+				blockHeight: blockHeight,
+				blockTime:   blockTime,
+				operator:    op,
+				sigType:     set.sigType,
+			})
+		}
+	}
+}
+
+// flushVoteExtSigs writes buffered vote-extension signatures using batch INSERT.
+func (p *Processor) flushVoteExtSigs(ctx context.Context) error {
+	p.voteExtSigMtx.Lock()
+	if len(p.voteExtSigBuffer) == 0 {
+		p.voteExtSigMtx.Unlock()
+		return nil
+	}
+	records := p.voteExtSigBuffer
+	p.voteExtSigBuffer = nil
+	p.voteExtSigMtx.Unlock()
+
+	var values []string
+	var args []any
+	for _, r := range records {
+		values = append(values, "(?, ?, ?, ?)")
+		args = append(args, r.blockHeight, r.blockTime, r.operator, r.sigType)
+	}
+
+	query := fmt.Sprintf("INSERT INTO %s (%s, %s, %s, %s) VALUES %s",
+		blockdb.TableNameVoteExtSigs,
+		blockdb.ColBlockHeight, blockdb.ColBlockTimestamp, blockdb.ColOperatorAddress, blockdb.ColSigType,
+		strings.Join(values, ", "))
+
+	insertCtx, cancel := context.WithTimeout(ctx, DefaultDBTimeout*10)
+	defer cancel()
+
+	if _, err := p.db.Exec(insertCtx, query, args...); err != nil {
+		p.logger.Error("batch insert vote_ext_sigs failed", "count", len(records), "error", err)
+		return err
+	}
+
+	p.logger.Debug("batch inserted vote_ext_sigs", "count", len(records))
+	return nil
+}
+
 // flushReports writes buffered oracle reports to the database using batch INSERT.
 func (p *Processor) flushReports(ctx context.Context) error {
 	p.reportMtx.Lock()
@@ -873,6 +956,9 @@ func (p *Processor) Flush(ctx context.Context) error {
 		return err
 	}
 	if err := p.flushBlockSigns(ctx); err != nil {
+		return err
+	}
+	if err := p.flushVoteExtSigs(ctx); err != nil {
 		return err
 	}
 	if err := p.flushReports(ctx); err != nil {

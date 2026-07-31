@@ -1985,6 +1985,63 @@ func (s *Server) getMissedCyclesPerReporterFromDBForPeriod(ctx context.Context, 
 // Note: a validator that was jailed/absent for the ENTIRE period has no rows at
 // all, so it does not appear here; the caller treats a missing entry as 0. That
 // only affects validators with zero activity in the whole window.
+// MissedByType is the miss count for one signature type over the lookback
+// window. Total is how many heights carried that signature type at all, so
+// Missed = Total - the heights this operator signed.
+type MissedByType struct {
+	Type   string `json:"type"`
+	Missed int64  `json:"missed"`
+	Total  int64  `json:"total"`
+}
+
+// getMissedByTypeForOperator returns miss counts per vote-extension signature
+// type (valset_sig, oracle_attestation) for one operator address. Consensus
+// misses stay in getMissedBlocksPerValidatorFromDB because they are keyed by
+// consensus address rather than operator address.
+func (s *Server) getMissedByTypeForOperator(ctx context.Context, operator string, periodDays int) []MissedByType {
+	if periodDays <= 0 {
+		periodDays = s.cfg.LookbackPeriodDays
+	}
+	if periodDays <= 0 {
+		periodDays = DefaultLookbackPeriodDays
+	}
+
+	query := fmt.Sprintf(`
+		SELECT
+			%s,
+			countDistinct(%s) AS total,
+			countDistinctIf(%s, %s = ?) AS signed
+		FROM %s
+		WHERE %s >= now() - INTERVAL %d DAY
+		GROUP BY %s
+	`,
+		blockdb.ColSigType,
+		blockdb.ColBlockHeight,
+		blockdb.ColBlockHeight, blockdb.ColOperatorAddress,
+		blockdb.TableNameVoteExtSigs,
+		blockdb.ColBlockTimestamp, periodDays,
+		blockdb.ColSigType,
+	)
+
+	rows, err := s.db.Query(ctx, query, operator)
+	if err != nil {
+		s.logger.Debug("failed to query vote_ext_sigs by type", "error", err)
+		return nil
+	}
+	defer func() { _ = rows.Close() }()
+
+	var out []MissedByType
+	for rows.Next() {
+		var sigType string
+		var total, signed int64
+		if err := rows.Scan(&sigType, &total, &signed); err != nil {
+			continue
+		}
+		out = append(out, MissedByType{Type: sigType, Missed: total - signed, Total: total})
+	}
+	return out
+}
+
 func (s *Server) getMissedBlocksPerValidatorFromDB(ctx context.Context, periodDays int) (map[string]int64, int64) {
 	result := make(map[string]int64)
 
