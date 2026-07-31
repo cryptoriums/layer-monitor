@@ -20,13 +20,12 @@ const (
 	TableNameBlockSigns     = "block_signs"
 	TableNameCycleRotations = "cycle_rotations"
 	TableNameAddresses      = "addresses"
-	// TableNameVoteExtSigs records who signed each vote-extension payload
-	// (valset checkpoints and oracle attestations) per height, so participation
-	// can be measured per signature type rather than only for consensus votes.
-	TableNameVoteExtSigs = "vote_ext_sigs"
 )
 
-// Vote-extension signature types stored in TableNameVoteExtSigs.SigType.
+// Signature types stored in TableNameBlockSigns.ColSigType. Consensus rows are
+// keyed by consensus address (tellorvalcons...); the vote-extension rows are
+// keyed by operator address (tellorvaloper...), since that is what the
+// vote-extension payloads carry. The type column disambiguates the two.
 const (
 	SigTypeConsensus         = "consensus"
 	SigTypeValsetSig         = "valset_sig"
@@ -65,10 +64,7 @@ const (
 	ColBlockTimestamp   = "block_timestamp"
 	ColValidatorAddress = "validator_address"
 	ColSigned           = "signed"
-
-	// Vote ext sigs table columns
-	ColOperatorAddress = "operator_address"
-	ColSigType         = "sig_type"
+	ColSigType          = "sig_type"
 
 	// Addresses table columns
 	ColName      = "name"
@@ -150,9 +146,6 @@ func EnsureTables(ctx context.Context, database Db) error {
 	if err := initCycleRotationsTable(ctx, database); err != nil {
 		return fmt.Errorf("create %s table: %w", TableNameCycleRotations, err)
 	}
-	if err := initVoteExtSigsTable(ctx, database); err != nil {
-		return fmt.Errorf("create %s table: %w", TableNameVoteExtSigs, err)
-	}
 	if err := initAddressesTable(ctx, database); err != nil {
 		return fmt.Errorf("create %s table: %w", TableNameAddresses, err)
 	}
@@ -217,45 +210,37 @@ func initRewardsTable(ctx context.Context, database Db) error {
 	return err
 }
 
+// initBlockSignsTable holds every signature we track, one row per signer per
+// height, with sig_type saying which kind it is: consensus precommits plus the
+// vote-extension payloads (valset checkpoints, oracle attestations). Absence of
+// a row for a (height, sig_type) is what counts as a miss.
 func initBlockSignsTable(ctx context.Context, database Db) error {
 	query := fmt.Sprintf(`
 		CREATE TABLE IF NOT EXISTS %s (
 			%s UInt64,
 			%s DateTime64(3, 'UTC'),
 			%s String,
-			%s UInt8
+			%s UInt8,
+			%s LowCardinality(String) DEFAULT '%s'
 		)
 		ENGINE = MergeTree
 		PARTITION BY toYYYYMM(%s)
 		ORDER BY (%s, %s)
 	`, TableNameBlockSigns,
 		ColBlockHeight, ColBlockTimestamp, ColValidatorAddress, ColSigned,
+		ColSigType, SigTypeConsensus,
 		ColBlockTimestamp, ColBlockHeight, ColValidatorAddress)
 
-	_, err := database.Exec(ctx, query)
-	return err
-}
+	if _, err := database.Exec(ctx, query); err != nil {
+		return err
+	}
 
-// initVoteExtSigsTable stores, per height, which operator signed which kind of
-// vote-extension payload. Consensus participation lives in block_signs and is
-// keyed by consensus address; this table is keyed by operator address, which is
-// what the vote-extension payloads carry.
-func initVoteExtSigsTable(ctx context.Context, database Db) error {
-	query := fmt.Sprintf(`
-		CREATE TABLE IF NOT EXISTS %s (
-			%s UInt64,
-			%s DateTime64(3, 'UTC'),
-			%s String,
-			%s LowCardinality(String)
-		)
-		ENGINE = ReplacingMergeTree
-		PARTITION BY toYYYYMM(%s)
-		ORDER BY (%s, %s, %s)
-	`, TableNameVoteExtSigs,
-		ColBlockHeight, ColBlockTimestamp, ColOperatorAddress, ColSigType,
-		ColBlockTimestamp, ColBlockHeight, ColSigType, ColOperatorAddress)
-
-	_, err := database.Exec(ctx, query)
+	// Existing deployments predate sig_type; add it so their historic rows keep
+	// counting as consensus signatures.
+	alter := fmt.Sprintf(
+		"ALTER TABLE %s ADD COLUMN IF NOT EXISTS %s LowCardinality(String) DEFAULT '%s'",
+		TableNameBlockSigns, ColSigType, SigTypeConsensus)
+	_, err := database.Exec(ctx, alter)
 	return err
 }
 
