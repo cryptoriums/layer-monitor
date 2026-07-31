@@ -1900,6 +1900,10 @@ func (s *Server) getMissedCyclesPerReporterFromDB(ctx context.Context) (map[stri
 //
 // Simple calculation: Missed = Total Cycles - Report Count
 // This shows how many cycles the reporter didn't submit a report.
+// cycleReportWindowBlocks is how many blocks after a cycle rotation a report
+// for that cycle may still land. Used to attribute reports to rotations.
+const cycleReportWindowBlocks = 6
+
 func (s *Server) getMissedCyclesPerReporterFromDBForPeriod(ctx context.Context, periodDays int) (map[string]int64, int64) {
 	result := make(map[string]int64)
 	if periodDays <= 0 {
@@ -1911,11 +1915,16 @@ func (s *Server) getMissedCyclesPerReporterFromDBForPeriod(ctx context.Context, 
 	minutes := periodDays * 24 * 60
 
 	// Get total cycle rotations in lookback period
+	// Exclude rotations newer than the last few reported blocks: their reports
+	// may still be in flight, and counting them would show phantom misses.
 	cyclesQuery := fmt.Sprintf(`
 		SELECT COUNT(*) as total_cycles
 		FROM %s
 		WHERE %s >= now() - INTERVAL %d MINUTE
-	`, blockdb.TableNameCycleRotations, blockdb.ColTimestamp, minutes)
+		  AND %s <= (SELECT max(%s) - %d FROM %s WHERE %s >= now() - INTERVAL 60 MINUTE)
+	`, blockdb.TableNameCycleRotations, blockdb.ColTimestamp, minutes,
+		blockdb.ColBlockHeight, blockdb.ColBlockNumber, cycleReportWindowBlocks,
+		blockdb.TableNameReports, blockdb.ColTimestamp)
 
 	var totalCycles int64
 	rows, err := s.db.Query(ctx, cyclesQuery)
@@ -1933,14 +1942,35 @@ func (s *Server) getMissedCyclesPerReporterFromDBForPeriod(ctx context.Context, 
 	}
 
 	// Get reports count per reporter (only cyclelist reports)
+	// Count how many distinct cycle rotations each reporter actually covered, by
+	// matching every report back to the rotation it belongs to. Subtracting two
+	// independently windowed counts (rotations vs reports) instead reports a
+	// miss whenever a rotation's report lands just outside the window, which
+	// inflated the figure roughly 16x.
 	reportsQuery := fmt.Sprintf(`
-		SELECT %s, COUNT(*) as report_count
-		FROM %s
-		WHERE %s >= now() - INTERVAL %d MINUTE
-		  AND %s = 1
+		SELECT %s, countDistinct(cand) as report_count
+		FROM (
+			SELECT %s, arrayJoin(range(toUInt64(%s - %d), toUInt64(%s + 1))) AS cand
+			FROM %s
+			WHERE %s >= now() - INTERVAL %d MINUTE
+			  AND %s = 1
+		)
+		WHERE cand IN (
+			SELECT %s FROM %s
+			WHERE %s >= now() - INTERVAL %d MINUTE
+			  AND %s <= (SELECT max(%s) - %d FROM %s WHERE %s >= now() - INTERVAL 60 MINUTE)
+		)
 		GROUP BY %s
-	`, blockdb.ColReporter, blockdb.TableNameReports,
-		blockdb.ColTimestamp, minutes, blockdb.ColCyclelist, blockdb.ColReporter)
+	`, blockdb.ColReporter,
+		blockdb.ColReporter, blockdb.ColBlockNumber, cycleReportWindowBlocks, blockdb.ColBlockNumber,
+		blockdb.TableNameReports,
+		blockdb.ColTimestamp, minutes,
+		blockdb.ColCyclelist,
+		blockdb.ColBlockHeight, blockdb.TableNameCycleRotations,
+		blockdb.ColTimestamp, minutes,
+		blockdb.ColBlockHeight, blockdb.ColBlockNumber, cycleReportWindowBlocks,
+		blockdb.TableNameReports, blockdb.ColTimestamp,
+		blockdb.ColReporter)
 
 	rows, err = s.db.Query(ctx, reportsQuery)
 	if err != nil {
