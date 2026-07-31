@@ -341,6 +341,7 @@ func (s *Server) routes() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", s.handleRoot)
 	mux.HandleFunc("/api/tree", s.handleGetTree)
+	mux.HandleFunc("/api/missed-by-type", s.handleMissedByType)
 	mux.HandleFunc("/api/refresh-tree", s.handleRefreshTree)
 	mux.HandleFunc("/assets/", s.handleAssets)
 	mux.Handle("/metrics", promhttp.HandlerFor(s.cfg.Registry, promhttp.HandlerOpts{}))
@@ -551,6 +552,31 @@ func (s *Server) handleGetTree(w http.ResponseWriter, r *http.Request) {
 		"loading":    isLoading,
 		"timestamp":  formatRelativeTime(timestamp),
 		"validators": validators,
+	})
+}
+
+// handleMissedByType reports our operator's missed vote-extension signatures
+// split by type (valset_sig, oracle_attestation). Consensus precommit misses
+// are keyed by consensus address and remain on the validator tree.
+func (s *Server) handleMissedByType(w http.ResponseWriter, r *http.Request) {
+	periodDays := s.cfg.LookbackPeriodDays
+	if p := r.URL.Query().Get("period"); p != "" {
+		if n, err := strconv.Atoi(p); err == nil && (n == 1 || n == 7 || n == 30) {
+			periodDays = n
+		}
+	}
+
+	operator := cryptoaddr.ToValidatorOperator(s.cfg.WalletAddress)
+	byType := s.getMissedByTypeForOperator(r.Context(), operator, periodDays)
+	if byType == nil {
+		byType = []MissedByType{}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"operator":    operator,
+		"period_days": periodDays,
+		"missed":      byType,
 	})
 }
 
