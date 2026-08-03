@@ -77,6 +77,19 @@ type bufferedBlockSign struct {
 	sigType string
 }
 
+// pendingCycle is a cycle that has rotated but is not yet judged. A report can
+// land in the same block as the rotation, or a few blocks after it, so counting
+// a miss at rotation time scores reports that did arrive as missed.
+type pendingCycle struct {
+	queryID   string
+	endHeight int64
+	reporters map[string]struct{}
+}
+
+// cycleGraceBlocks is how long after a rotation a report may still arrive and
+// count toward the cycle that just ended.
+const cycleGraceBlocks = 6
+
 // bufferedReport represents a buffered oracle report for batch insert into the reports table.
 type bufferedReport struct {
 	reporter        string
@@ -144,6 +157,7 @@ type Processor struct {
 	currentCycleQueryID     string
 	knownReporters          map[string]struct{} // All reporters who have ever submitted
 	reportersInCurrentCycle map[string]struct{} // Reporters who submitted in current cycle
+	pendingCycles           []pendingCycle      // rotated, awaiting the grace window
 
 	// Cumulative amount tracking for reward increment calculation.
 	// Maps reporter address -> last known cumulative amount.
@@ -240,6 +254,7 @@ func (p *Processor) ProcessBlock(ctx context.Context, blockEv ctypes.EventDataNe
 	p.insertTx(blockEv)
 	p.insertEvents(ctx, blockEv)
 	p.insertBlockSigns(blockEv)
+	p.evaluatePendingCycles(blockEv.Block.Height)
 }
 
 // handleCycleRotation is called when a rotating-cyclelist-with-next-query event is detected.
@@ -268,23 +283,49 @@ func (p *Processor) handleCycleRotation(ctx context.Context, height int64, block
 	// New cycle detected - record to DB
 	p.recordCycleRotation(ctx, height, blockTime, newQueryID)
 
-	// Count a missed report if our reporter did not submit in the cycle that just
-	// completed. WalletAddress is guaranteed non-empty (validated at startup).
-	if _, submitted := p.reportersInCurrentCycle[p.cfg.WalletAddress]; !submitted {
-		if _, known := p.knownReporters[p.cfg.WalletAddress]; known {
-			p.missedReports.Inc()
-			p.logger.Warn("our reporter missed submitting report in cycle",
-				"height", height,
-				"missed_query_id", p.currentCycleQueryID,
-				"new_query_id", newQueryID,
-				"reporter", p.cfg.WalletAddress,
-			)
-		}
+	// Do not judge the cycle yet: its reports may land in this same block or in
+	// the next few. Queue it and evaluate once the grace window has passed.
+	snapshot := make(map[string]struct{}, len(p.reportersInCurrentCycle))
+	for r := range p.reportersInCurrentCycle {
+		snapshot[r] = struct{}{}
 	}
+	p.pendingCycles = append(p.pendingCycles, pendingCycle{
+		queryID:   p.currentCycleQueryID,
+		endHeight: height,
+		reporters: snapshot,
+	})
 
 	// Reset for new cycle
 	p.currentCycleQueryID = newQueryID
 	p.reportersInCurrentCycle = make(map[string]struct{})
+}
+
+// evaluatePendingCycles judges cycles whose grace window has closed: by now any
+// report belonging to them has landed, so absence is a real miss.
+func (p *Processor) evaluatePendingCycles(height int64) {
+	p.cycleMtx.Lock()
+	defer p.cycleMtx.Unlock()
+
+	kept := p.pendingCycles[:0]
+	for _, pc := range p.pendingCycles {
+		if height < pc.endHeight+cycleGraceBlocks {
+			kept = append(kept, pc)
+			continue
+		}
+		if _, submitted := pc.reporters[p.cfg.WalletAddress]; submitted {
+			continue
+		}
+		if _, known := p.knownReporters[p.cfg.WalletAddress]; !known {
+			continue
+		}
+		p.missedReports.Inc()
+		p.logger.Warn("our reporter missed submitting report in cycle",
+			"cycle_end_height", pc.endHeight,
+			"missed_query_id", pc.queryID,
+			"reporter", p.cfg.WalletAddress,
+		)
+	}
+	p.pendingCycles = kept
 }
 
 // recordCycleRotation buffers a cycle rotation event for batch insert.
@@ -306,6 +347,11 @@ func (p *Processor) markReporterReportedInCycle(reporter string) {
 	defer p.cycleMtx.Unlock()
 	p.knownReporters[reporter] = struct{}{}
 	p.reportersInCurrentCycle[reporter] = struct{}{}
+	// A report can arrive after the rotation that ended its cycle; credit any
+	// cycle still inside its grace window so it is not scored as missed.
+	for i := range p.pendingCycles {
+		p.pendingCycles[i].reporters[reporter] = struct{}{}
+	}
 }
 
 const processedHeightsLimit = 1000
@@ -395,14 +441,17 @@ func (p *Processor) insertEvents(ctx context.Context, blockEv ctypes.EventDataNe
 	}
 
 	var _ string // currentQueryID removed; retained for future use if needed
+	var pendingRotations []string
 	for _, ev := range allEvents {
 		switch ev.Type {
 
 		// Cyclelist rotation event - indicates a new query cycle has started.
 		// Check if our reporter submitted in the previous cycle.
 		case "rotating-cyclelist-with-next-query":
-			newQueryID := getAttribute(ev, AttrKeyQueryID)
-			p.handleCycleRotation(ctx, height, blockTime, newQueryID)
+			// Deferred until every new_report in this block has been registered:
+			// a report can land in the same block as the rotation that ends its
+			// cycle, and handling the rotation first would score it as missed.
+			pendingRotations = append(pendingRotations, getAttribute(ev, AttrKeyQueryID))
 
 		// Contains oracle data submission details. Used to track reporter activity.
 		case "new_report":
@@ -462,6 +511,12 @@ func (p *Processor) insertEvents(ctx context.Context, blockEv ctypes.EventDataNe
 				monitor.IncError("validatorRewardsAllocInsert", ComponentName)
 			}
 		}
+	}
+
+	// Now that all reports in this block are registered, close out any cycles
+	// that rotated in it.
+	for _, newQueryID := range pendingRotations {
+		p.handleCycleRotation(ctx, height, blockTime, newQueryID)
 	}
 }
 
