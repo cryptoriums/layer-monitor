@@ -30,7 +30,7 @@ require (
 require (
 	cosmossdk.io/errors v1.0.2 // indirect
 	cosmossdk.io/math v1.5.3 // indirect
-	github.com/cosmos/gogoproto v1.7.0 // indirect
+	github.com/cosmos/gogoproto v1.7.0
 	github.com/cosmos/ibc-go/modules/capability v1.0.0 // indirect
 	github.com/ethereum/go-ethereum v1.16.2 // indirect
 	github.com/golang/protobuf v1.5.4 // indirect

@@ -1,6 +1,7 @@
 package web
 
 import (
+	"bytes"
 	"compress/gzip"
 	"context"
 	"crypto/tls"
@@ -23,6 +24,7 @@ import (
 	"time"
 
 	cryptoaddr "github.com/cryptoriums/layer-monitor/addr"
+	"github.com/cosmos/gogoproto/jsonpb"
 	blockdb "github.com/cryptoriums/layer-monitor/db"
 	"github.com/cryptoriums/layer-monitor/encoding"
 	monitor "github.com/cryptoriums/layer-monitor/metrics"
@@ -395,6 +397,10 @@ func (w *gzipResponseWriter) Write(b []byte) (int, error) {
 	return w.Writer.Write(b)
 }
 
+// assetVersion changes every time the binary starts, so a deploy gives the CSS
+// and JS new URLs and browsers cannot serve a stale copy of them.
+var assetVersion = strconv.FormatInt(time.Now().Unix(), 36)
+
 func (s *Server) handleRoot(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
@@ -468,6 +474,11 @@ func (s *Server) handleRoot(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Without this browsers heuristically cache the page and keep serving an old
+	// build in normal windows (incognito looks fine because its cache is empty).
+	w.Header().Set("Cache-Control", "no-cache, must-revalidate")
+	w.Header().Set("Pragma", "no-cache")
+
 	if err := tpl.Execute(w, map[string]any{
 		"ValidatorTree":     validatorTree,
 		"TreeCacheTime":     cacheTimeStr,
@@ -489,6 +500,7 @@ func (s *Server) handleRoot(w http.ResponseWriter, r *http.Request) {
 		"LayerRPCURL":       s.cfg.PublicRPCURL,
 		"ChainID":           cryptoaddr.FetchChainID(s.cfg.LayerAPIURLs),
 		"ExplorerURL":       s.cfg.ExplorerURL,
+		"AssetVersion":      assetVersion,
 	}); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 	}
@@ -1662,7 +1674,10 @@ func (s *Server) fetchAllSelectionsConcurrent(ctx context.Context, reporterMap m
 	result := make(map[string][]*reportertypes.FormattedSelection, len(reporterMap))
 	var mu sync.Mutex
 	var wg sync.WaitGroup
-	sem := make(chan struct{}, 16) // cap concurrent chain queries
+	// Keep this low: our own node does not serve the REST API yet, so these calls
+	// go to the public endpoint, which refuses higher concurrency. Failed fetches
+	// silently empty every reporter's selectors and stake.
+	sem := make(chan struct{}, 4)
 	for reporterAddr := range reporterMap {
 		wg.Add(1)
 		go func(addr string) {
@@ -1707,8 +1722,12 @@ func (s *Server) fetchSelectionsForReporter(ctx context.Context, reporterAddr st
 			continue
 		}
 
+		// Tolerate fields the chain has added since this binary was built. The
+		// codec's UnmarshalJSON is strict, so a single unknown field (e.g.
+		// dispute_locked_until, added in v6.1.6) fails the whole decode and
+		// silently blanks every reporter's selectors and stake.
 		var result reportertypes.QuerySelectionsToResponse
-		if err := s.cdc.UnmarshalJSON(body, &result); err != nil {
+		if err := (&jsonpb.Unmarshaler{AllowUnknownFields: true}).Unmarshal(bytes.NewReader(body), &result); err != nil {
 			s.logger.Debug("selections decode error", "reporter", reporterAddr, "error", err)
 			continue
 		}
