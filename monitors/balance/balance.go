@@ -35,8 +35,8 @@ type Monitor struct {
 	cfg        Config
 	httpClient *http.Client
 
-	walletBalance    prometheus.Gauge
-	stakingBalance   prometheus.Gauge
+	unbondedBalance  prometheus.Gauge
+	bondedBalance    prometheus.Gauge
 	tipsBalance      prometheus.Gauge
 	unbondingBalance prometheus.Gauge
 	totalBalance     prometheus.Gauge
@@ -55,17 +55,17 @@ func New(logger log.Logger, cfg Config, reg prometheus.Registerer) (*Monitor, er
 		cfg.CheckInterval = DefaultCheckInterval
 	}
 
-	walletBalance := promauto.With(reg).NewGauge(prometheus.GaugeOpts{
+	unbondedBalance := promauto.With(reg).NewGauge(prometheus.GaugeOpts{
 		Namespace: monitor.MetricsNamespace,
 		Subsystem: "balance",
-		Name:      "wallet_balance_loya",
-		Help:      "Wallet (bank) balance in loya",
+		Name:      "unbonded_loya",
+		Help:      "Spendable (unbonded, unlocked) wallet balance in loya",
 	})
-	stakingBalance := promauto.With(reg).NewGauge(prometheus.GaugeOpts{
+	bondedBalance := promauto.With(reg).NewGauge(prometheus.GaugeOpts{
 		Namespace: monitor.MetricsNamespace,
 		Subsystem: "balance",
-		Name:      "staking_balance_loya",
-		Help:      "Total staked balance in loya",
+		Name:      "bonded_loya",
+		Help:      "Total bonded (delegated) balance in loya",
 	})
 	tipsBalance := promauto.With(reg).NewGauge(prometheus.GaugeOpts{
 		Namespace: monitor.MetricsNamespace,
@@ -76,14 +76,14 @@ func New(logger log.Logger, cfg Config, reg prometheus.Registerer) (*Monitor, er
 	unbondingBalance := promauto.With(reg).NewGauge(prometheus.GaugeOpts{
 		Namespace: monitor.MetricsNamespace,
 		Subsystem: "balance",
-		Name:      "unbonding_balance_loya",
-		Help:      "Unbonding delegation balance in loya",
+		Name:      "unbonding_loya",
+		Help:      "Unbonding (still locked, not yet released) balance in loya",
 	})
 	totalBalance := promauto.With(reg).NewGauge(prometheus.GaugeOpts{
 		Namespace: monitor.MetricsNamespace,
 		Subsystem: "balance",
 		Name:      "total_balance_loya",
-		Help:      "Total balance (wallet + staking + tips + unbonding) in loya",
+		Help:      "Total balance (unbonded + bonded + tips + unbonding) in loya",
 	})
 	lastCheckTime := promauto.With(reg).NewGauge(prometheus.GaugeOpts{
 		Namespace: monitor.MetricsNamespace,
@@ -98,8 +98,8 @@ func New(logger log.Logger, cfg Config, reg prometheus.Registerer) (*Monitor, er
 		httpClient: &http.Client{
 			Timeout: monitor.DefaultRequestTimeout,
 		},
-		walletBalance:    walletBalance,
-		stakingBalance:   stakingBalance,
+		unbondedBalance:  unbondedBalance,
+		bondedBalance:    bondedBalance,
 		tipsBalance:      tipsBalance,
 		unbondingBalance: unbondingBalance,
 		totalBalance:     totalBalance,
@@ -127,31 +127,32 @@ func (m *Monitor) Run(ctx context.Context) error {
 }
 
 func (m *Monitor) checkBalances(ctx context.Context) {
-	wallet := m.fetchWalletBalance(ctx)
-	staking := m.fetchStakingBalance(ctx)
+	unbonded := m.fetchUnbondedBalance(ctx)
+	bonded := m.fetchBondedBalance(ctx)
 	unbonding := m.fetchUnbondingBalance(ctx)
 	tips := m.fetchTipsBalance(ctx)
 
-	m.walletBalance.Set(wallet)
-	m.stakingBalance.Set(staking)
+	m.unbondedBalance.Set(unbonded)
+	m.bondedBalance.Set(bonded)
 	m.unbondingBalance.Set(unbonding)
 	m.tipsBalance.Set(tips)
-	m.totalBalance.Set(wallet + staking + unbonding + tips)
+	m.totalBalance.Set(unbonded + bonded + unbonding + tips)
 	m.lastCheckTime.Set(float64(time.Now().Unix()))
 
 	m.logger.Info("balance check complete",
-		"wallet_loya", wallet,
-		"staking_loya", staking,
+		"unbonded_loya", unbonded,
+		"bonded_loya", bonded,
 		"unbonding_loya", unbonding,
 		"tips_loya", tips,
-		"total_loya", wallet+staking+unbonding+tips,
+		"total_loya", unbonded+bonded+unbonding+tips,
 	)
 }
 
-// fetchWalletBalance returns the bank balance in loya.
-func (m *Monitor) fetchWalletBalance(ctx context.Context) float64 {
+// fetchUnbondedBalance returns the spendable bank balance in loya. It uses
+// spendable_balances rather than balances so anything locked is excluded.
+func (m *Monitor) fetchUnbondedBalance(ctx context.Context) float64 {
 	for _, baseURL := range m.cfg.LayerAPIURLs {
-		url := fmt.Sprintf("%s/cosmos/bank/v1beta1/balances/%s", baseURL, m.cfg.WalletAddress)
+		url := fmt.Sprintf("%s/cosmos/bank/v1beta1/spendable_balances/%s", baseURL, m.cfg.WalletAddress)
 		body, ok := m.doGet(ctx, url)
 		if !ok {
 			continue
@@ -164,7 +165,7 @@ func (m *Monitor) fetchWalletBalance(ctx context.Context) float64 {
 			} `json:"balances"`
 		}
 		if err := json.Unmarshal(body, &result); err != nil {
-			m.logger.Debug("failed to decode wallet balance", "url", url, "error", err)
+			m.logger.Debug("failed to decode spendable balance", "url", url, "error", err)
 			continue
 		}
 
@@ -178,12 +179,12 @@ func (m *Monitor) fetchWalletBalance(ctx context.Context) float64 {
 		}
 		return total
 	}
-	m.logger.Warn("failed to fetch wallet balance from all API URLs")
+	m.logger.Warn("failed to fetch spendable balance from all API URLs")
 	return 0
 }
 
-// fetchStakingBalance returns the total delegated balance in loya.
-func (m *Monitor) fetchStakingBalance(ctx context.Context) float64 {
+// fetchBondedBalance returns the total delegated (bonded) balance in loya.
+func (m *Monitor) fetchBondedBalance(ctx context.Context) float64 {
 	for _, baseURL := range m.cfg.LayerAPIURLs {
 		url := fmt.Sprintf("%s/cosmos/staking/v1beta1/delegations/%s", baseURL, m.cfg.WalletAddress)
 		body, ok := m.doGet(ctx, url)
@@ -200,7 +201,7 @@ func (m *Monitor) fetchStakingBalance(ctx context.Context) float64 {
 			} `json:"delegation_responses"`
 		}
 		if err := json.Unmarshal(body, &result); err != nil {
-			m.logger.Debug("failed to decode staking balance", "url", url, "error", err)
+			m.logger.Debug("failed to decode bonded balance", "url", url, "error", err)
 			continue
 		}
 
@@ -214,7 +215,7 @@ func (m *Monitor) fetchStakingBalance(ctx context.Context) float64 {
 		}
 		return total
 	}
-	m.logger.Warn("failed to fetch staking balance from all API URLs")
+	m.logger.Warn("failed to fetch bonded balance from all API URLs")
 	return 0
 }
 
