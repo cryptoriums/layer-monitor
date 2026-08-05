@@ -215,9 +215,9 @@ func NewWithConfig(
 		Namespace: monitor.MetricsNamespace,
 		Subsystem: "processor",
 		Name:      "missed_our_validator_blocks_total",
-		Help: "Total signatures our validator missed, by type: consensus precommits, " +
-			"valset checkpoints and oracle attestations",
-	}, []string{"type"})
+		Help: "Total signatures our validator missed, by validator and type: consensus " +
+			"precommits, valset checkpoints and oracle attestations",
+	}, []string{"validator", "type"})
 	p.missedReports = promauto.With(cfg.Registerer).NewCounter(prometheus.CounterOpts{
 		Namespace: monitor.MetricsNamespace,
 		Subsystem: "processor",
@@ -810,7 +810,10 @@ func (p *Processor) recordVoteExtSigs(voteExtTx *app.VoteExtTx, blockHeight int6
 			})
 		}
 		if !ourSigFound && ourOperator != "" {
-			p.missedBlocks.WithLabelValues(set.sigType).Inc()
+			// Labelled with the consensus address so both signing paths report the
+			// same validator identity; the vote-extension payloads carry the
+			// operator address, which would otherwise split the series.
+			p.missedBlocks.WithLabelValues(p.cfg.ValidatorConsensusAddress, set.sigType).Inc()
 		}
 	}
 }
@@ -1022,7 +1025,7 @@ func (p *Processor) insertBlockSigns(blockEv ctypes.EventDataNewBlock) {
 
 		// Log a warning if our validator missed signing while in the active set.
 		if validatorAddr == p.cfg.ValidatorConsensusAddress && signed == 0 {
-			p.missedBlocks.WithLabelValues(blockdb.SigTypeConsensus).Inc()
+			p.missedBlocks.WithLabelValues(p.cfg.ValidatorConsensusAddress, blockdb.SigTypeConsensus).Inc()
 			p.logger.Warn("our validator missed signing block", "height", commitHeight, "validator", validatorAddr)
 		}
 
