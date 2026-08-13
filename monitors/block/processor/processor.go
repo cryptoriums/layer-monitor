@@ -159,6 +159,14 @@ type Processor struct {
 	blockSignBuffer []bufferedBlockSign
 	blockSignMtx    sync.Mutex
 
+	// Position of our validator within LastCommit.Signatures, learned from blocks we
+	// did sign. CometBFT zeroes ValidatorAddress on an absent vote, so a miss cannot be
+	// attributed by address — only by index. ourSigSetSize records the commit size when
+	// the index was learned; a different size means the set changed and the index is
+	// stale, so it is discarded rather than trusted. See insertBlockSigns.
+	ourSigIndex   int // -1 when not yet learned
+	ourSigSetSize int
+
 	// Batch insert buffer for oracle reports.
 	reportBuffer []bufferedReport
 	reportMtx    sync.Mutex
@@ -205,6 +213,7 @@ func NewWithConfig(
 		processedHeights:        make(map[int64]struct{}),
 		knownReporters:          make(map[string]struct{}),
 		reportersInCurrentCycle: make(map[string]struct{}),
+		ourSigIndex:             -1, // not yet learned; 0 is a valid index
 	}
 	if cfg.Registerer == nil {
 		// Use an isolated registry by default to avoid duplicate registration
@@ -1003,8 +1012,14 @@ func (p *Processor) insertBlockSigns(blockEv ctypes.EventDataNewBlock) {
 	// The signatures are for block at height-1
 	commitHeight := currentHeight - 1
 	blockTime := blockEv.Block.Time
-	for _, sig := range blockEv.Block.LastCommit.Signatures {
-		// Skip empty signatures (validator not in set at that height)
+	sigs := blockEv.Block.LastCommit.Signatures
+	ourIndex := -1
+	for i, sig := range sigs {
+		// An absent vote carries no ValidatorAddress: CometBFT's NewCommitSigAbsent
+		// leaves it empty. Such an entry cannot be attributed to a validator by address,
+		// only by its position in the set, so it is handled after this loop for our own
+		// validator (the one whose index we can learn). Skipping it here is why a missed
+		// block previously produced no row at all and left the counter flat.
 		if len(sig.ValidatorAddress) == 0 {
 			continue
 		}
@@ -1023,10 +1038,15 @@ func (p *Processor) insertBlockSigns(blockEv ctypes.EventDataNewBlock) {
 		// Convert to bech32 consensus address format
 		validatorAddr := sdk.ConsAddress(sig.ValidatorAddress).String()
 
-		// Log a warning if our validator missed signing while in the active set.
-		if validatorAddr == p.cfg.ValidatorConsensusAddress && signed == 0 {
-			p.missedBlocks.WithLabelValues(p.cfg.ValidatorConsensusAddress, blockdb.SigTypeConsensus).Inc()
-			p.logger.Warn("our validator missed signing block", "height", commitHeight, "validator", validatorAddr)
+		if validatorAddr == p.cfg.ValidatorConsensusAddress {
+			ourIndex = i
+			// Log a warning if our validator missed signing while in the active set.
+			// This covers a nil vote, which does carry an address; an absent vote does
+			// not and is counted after the loop.
+			if signed == 0 {
+				p.missedBlocks.WithLabelValues(p.cfg.ValidatorConsensusAddress, blockdb.SigTypeConsensus).Inc()
+				p.logger.Warn("our validator missed signing block", "height", commitHeight, "validator", validatorAddr)
+			}
 		}
 
 		p.blockSignMtx.Lock()
@@ -1040,10 +1060,65 @@ func (p *Processor) insertBlockSigns(blockEv ctypes.EventDataNewBlock) {
 		p.blockSignMtx.Unlock()
 	}
 
+	p.recordOurAbsence(commitHeight, blockTime, sigs, ourIndex)
+
 	// Blocks where our validator is out of the active set (jailed/unbonded) are
 	// intentionally NOT counted as missed: it is absent from the commit entirely,
 	// exactly like every other out-of-set validator. Counting only in-set absences
 	// keeps the missed-block calculation identical for all validators.
+}
+
+// recordOurAbsence records a signed=0 row for our validator when it appears in the
+// commit as an ABSENT vote, which carries no ValidatorAddress and so cannot be matched
+// by address in the loop above.
+//
+// Our position is learned from any block we did sign (ourIndex >= 0) and reused while
+// the commit size is unchanged. A different size means the validator set changed and the
+// remembered position may now belong to someone else, so it is discarded and relearned
+// from the next block we sign — at worst that under-counts briefly, which is the same
+// direction as the previous behaviour and never mis-attributes another validator.
+//
+// Only our own validator is handled: attributing every absent entry would require the
+// validator set for that height, which this processor does not fetch.
+func (p *Processor) recordOurAbsence(commitHeight int64, blockTime time.Time, sigs []ctypes.CommitSig, ourIndex int) {
+	if p.cfg.ValidatorConsensusAddress == "" {
+		return
+	}
+
+	// Seen by address this block: nothing to infer, just refresh what we know.
+	if ourIndex >= 0 {
+		p.ourSigIndex = ourIndex
+		p.ourSigSetSize = len(sigs)
+		return
+	}
+	if p.ourSigIndex < 0 || p.ourSigSetSize != len(sigs) {
+		p.ourSigIndex = -1
+		return
+	}
+	if p.ourSigIndex >= len(sigs) {
+		p.ourSigIndex = -1
+		return
+	}
+	// A non-empty address here means the slot belongs to a different validator, so the
+	// set was reordered without changing size; drop the stale index.
+	if len(sigs[p.ourSigIndex].ValidatorAddress) != 0 {
+		p.ourSigIndex = -1
+		return
+	}
+
+	p.missedBlocks.WithLabelValues(p.cfg.ValidatorConsensusAddress, blockdb.SigTypeConsensus).Inc()
+	p.logger.Warn("our validator was absent from the commit",
+		"height", commitHeight, "validator", p.cfg.ValidatorConsensusAddress, "index", p.ourSigIndex)
+
+	p.blockSignMtx.Lock()
+	p.blockSignBuffer = append(p.blockSignBuffer, bufferedBlockSign{
+		blockHeight: commitHeight,
+		blockTime:   blockTime,
+		validator:   p.cfg.ValidatorConsensusAddress,
+		signed:      0,
+		sigType:     blockdb.SigTypeConsensus,
+	})
+	p.blockSignMtx.Unlock()
 }
 
 func getAttribute(ev abci.Event, key string) string {
