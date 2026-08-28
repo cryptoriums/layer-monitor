@@ -36,6 +36,7 @@ import (
 	"github.com/cosmos/cosmos-sdk/codec"
 	codectypes "github.com/cosmos/cosmos-sdk/codec/types"
 	stakingtypes "github.com/cosmos/cosmos-sdk/x/staking/types"
+	"github.com/cosmos/gogoproto/jsonpb"
 )
 
 const (
@@ -1689,7 +1690,7 @@ func (s *Server) fetchSelectionsForReporter(ctx context.Context, reporterAddr st
 		}
 
 		var result reportertypes.QuerySelectionsToResponse
-		if err := s.cdc.UnmarshalJSON(body, &result); err != nil {
+		if err := unmarshalSelectionsJSON(body, &result); err != nil {
 			s.logger.Debug("selections decode error", "reporter", reporterAddr, "error", err)
 			continue
 		}
@@ -1702,6 +1703,13 @@ func (s *Server) fetchSelectionsForReporter(ctx context.Context, reporterAddr st
 	}
 
 	return selections
+}
+
+// unmarshalSelectionsJSON tolerates response fields added by newer Layer versions.
+// The monitor only reads concrete reporter types here, so no interface unpacking is needed.
+func unmarshalSelectionsJSON(body []byte, result *reportertypes.QuerySelectionsToResponse) error {
+	unmarshaler := jsonpb.Unmarshaler{AllowUnknownFields: true}
+	return unmarshaler.Unmarshal(strings.NewReader(string(body)), result)
 }
 
 // fetchDelegationsForSelector fetches all delegations for a selector.
