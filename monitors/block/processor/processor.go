@@ -236,6 +236,13 @@ func NewWithConfig(
 		Help: "Total signatures our validator missed, by validator and type: consensus " +
 			"precommits, valset checkpoints and oracle attestations",
 	}, []string{"validator", "type"})
+	for _, sigType := range []string{
+		blockdb.SigTypeConsensus,
+		blockdb.SigTypeValsetSig,
+		blockdb.SigTypeOracleAttestation,
+	} {
+		p.missedBlocks.WithLabelValues(cfg.ValidatorConsensusAddress, sigType)
+	}
 	p.missedReports = promauto.With(cfg.Registerer).NewCounter(prometheus.CounterOpts{
 		Namespace: monitor.MetricsNamespace,
 		Subsystem: "processor",
