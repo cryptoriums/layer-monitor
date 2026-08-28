@@ -9,9 +9,9 @@ import (
 	"time"
 
 	_ "github.com/chdb-io/chdb-go/chdb/driver"
-	"github.com/stretchr/testify/require"
 	blockdb "github.com/cryptoriums/layer-monitor/db"
 	cryptolog "github.com/cryptoriums/layer-monitor/log"
+	"github.com/stretchr/testify/require"
 )
 
 // For all tests use only public module functions.
@@ -322,7 +322,13 @@ func TestDeduplication(t *testing.T) {
 			}
 			fetcher.SetBatch(idxList, fixtures)
 
-			cfg := Config{BackfillLookback: 0, PollInterval: 50 * time.Millisecond}
+			cfg := Config{
+				BackfillLookback: 0,
+				PollInterval:     50 * time.Millisecond,
+				// This test asserts database convergence, not the production
+				// buffering delay. Keep its flush deadline short and deterministic.
+				FlushInterval: 100 * time.Millisecond,
+			}
 			monitor, err := NewWithFetcher(
 				context.Background(),
 				cryptolog.New(),
