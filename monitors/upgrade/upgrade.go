@@ -48,6 +48,8 @@ type Monitor struct {
 	proposed        prometheus.Gauge // 1 when a software-upgrade proposal is in voting
 	planHeight      prometheus.Gauge // scheduled upgrade height (0 if none)
 	blocksRemaining prometheus.Gauge // blocks until the scheduled height (0 if none)
+	proposedHeight  prometheus.Gauge // proposed upgrade height (0 if none)
+	proposedBlocks  prometheus.Gauge // blocks until the proposed height (0 if none)
 	proposalsVoting prometheus.Gauge // number of governance proposals in the voting period
 }
 
@@ -78,6 +80,8 @@ func New(logger log.Logger, cfg Config, reg prometheus.Registerer) (*Monitor, er
 		proposed:        gauge("proposed", "1 if a software-upgrade governance proposal is in the voting period, 0 otherwise"),
 		planHeight:      gauge("plan_height", "Target block height of the scheduled upgrade (0 if none)"),
 		blocksRemaining: gauge("blocks_remaining", "Blocks remaining until the scheduled upgrade height (0 if none)"),
+		proposedHeight:  gauge("proposed_plan_height", "Target block height in the software-upgrade proposal currently in voting (0 if none)"),
+		proposedBlocks:  gauge("proposed_blocks_remaining", "Blocks remaining until the proposed upgrade height (0 if none)"),
 		proposalsVoting: promauto.With(reg).NewGauge(prometheus.GaugeOpts{
 			Namespace: monitor.MetricsNamespace,
 			Subsystem: "gov",
@@ -107,8 +111,9 @@ func (m *Monitor) Run(ctx context.Context) error {
 
 // check updates the upgrade and governance-proposal metrics.
 func (m *Monitor) check(ctx context.Context) {
-	m.updatePlanMetrics(ctx, m.currentHeight(ctx))
-	m.updateProposalMetrics(ctx)
+	height := m.currentHeight(ctx)
+	m.updatePlanMetrics(ctx, height)
+	m.updateProposalMetrics(ctx, height)
 }
 
 // updatePlanMetrics sets pending/plan_height/blocks_remaining from the scheduled plan.
@@ -140,7 +145,7 @@ func (m *Monitor) updatePlanMetrics(ctx context.Context, height int64) {
 
 // updateProposalMetrics counts governance proposals in the voting period and flags whether
 // any of them is a software upgrade. Metrics are left unchanged on a query error.
-func (m *Monitor) updateProposalMetrics(ctx context.Context) {
+func (m *Monitor) updateProposalMetrics(ctx context.Context, height int64) {
 	var resp govv1.QueryProposalsResponse
 	if err := m.getProto(ctx, "/cosmos/gov/v1/proposals?pagination.limit=200", &resp); err != nil {
 		m.logger.Debug("upgrade monitor: proposals query failed", "error", err)
@@ -150,6 +155,7 @@ func (m *Monitor) updateProposalMetrics(ctx context.Context) {
 	swTypeURL := sdk.MsgTypeURL(&upgradetypes.MsgSoftwareUpgrade{})
 	votingCount := 0
 	upgradeName := ""
+	upgradeHeight := int64(0)
 	for _, p := range resp.Proposals {
 		if p.Status != govv1.StatusVotingPeriod {
 			continue
@@ -163,15 +169,28 @@ func (m *Monitor) updateProposalMetrics(ctx context.Context) {
 			if err := m.cdc.Unmarshal(anyMsg.Value, &sw); err != nil {
 				continue
 			}
+			if upgradeHeight > 0 && sw.Plan.Height >= upgradeHeight {
+				continue
+			}
 			upgradeName = sw.Plan.Name
+			upgradeHeight = sw.Plan.Height
 		}
 	}
 
 	m.proposalsVoting.Set(float64(votingCount))
 	m.proposed.Set(0)
+	m.proposedHeight.Set(0)
+	m.proposedBlocks.Set(0)
 	if upgradeName != "" {
+		remaining := upgradeHeight - height
+		if remaining < 0 {
+			remaining = 0
+		}
 		m.proposed.Set(1)
-		m.logger.Warn("software-upgrade proposal in voting period", "name", upgradeName)
+		m.proposedHeight.Set(float64(upgradeHeight))
+		m.proposedBlocks.Set(float64(remaining))
+		m.logger.Warn("software-upgrade proposal in voting period",
+			"name", upgradeName, "height", upgradeHeight, "current_height", height, "blocks_remaining", remaining)
 	}
 	if votingCount > 0 {
 		m.logger.Info("governance proposals in voting period", "count", votingCount)
