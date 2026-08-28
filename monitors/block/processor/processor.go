@@ -77,6 +77,17 @@ type bufferedBlockSign struct {
 	sigType string
 }
 
+// pendingCycle is a cycle whose six-block reporting window is still open.
+// Reports are matched by query ID because several cycles can be pending at the
+// same time and a report for one cycle must not hide a miss in another.
+type pendingCycle struct {
+	queryID     string
+	startHeight int64
+	reporters   map[string]struct{}
+}
+
+const cycleReportWindowBlocks = 6
+
 // bufferedReport represents a buffered oracle report for batch insert into the reports table.
 type bufferedReport struct {
 	reporter        string
@@ -140,10 +151,9 @@ type Processor struct {
 	heightQueue      []int64
 
 	// Cycle-based reporter tracking for all reporters
-	cycleMtx                sync.Mutex
-	currentCycleQueryID     string
-	knownReporters          map[string]struct{} // All reporters who have ever submitted
-	reportersInCurrentCycle map[string]struct{} // Reporters who submitted in current cycle
+	cycleMtx       sync.Mutex
+	knownReporters map[string]struct{} // All reporters who have ever submitted
+	pendingCycles  []pendingCycle
 
 	// Cumulative amount tracking for reward increment calculation.
 	// Maps reporter address -> last known cumulative amount.
@@ -205,15 +215,14 @@ func NewWithConfig(
 	cfg ProcessorConfig,
 ) *Processor {
 	p := &Processor{
-		logger:                  logger.With("component", ComponentName),
-		db:                      db,
-		txDecoder:               NewTxDecoder(),
-		httpClient:              &http.Client{Timeout: 10 * time.Second},
-		cfg:                     cfg,
-		processedHeights:        make(map[int64]struct{}),
-		knownReporters:          make(map[string]struct{}),
-		reportersInCurrentCycle: make(map[string]struct{}),
-		ourSigIndex:             -1, // not yet learned; 0 is a valid index
+		logger:           logger.With("component", ComponentName),
+		db:               db,
+		txDecoder:        NewTxDecoder(),
+		httpClient:       &http.Client{Timeout: 10 * time.Second},
+		cfg:              cfg,
+		processedHeights: make(map[int64]struct{}),
+		knownReporters:   make(map[string]struct{}),
+		ourSigIndex:      -1, // not yet learned; 0 is a valid index
 	}
 	if cfg.Registerer == nil {
 		// Use an isolated registry by default to avoid duplicate registration
@@ -249,51 +258,54 @@ func (p *Processor) ProcessBlock(ctx context.Context, blockEv ctypes.EventDataNe
 	p.insertTx(blockEv)
 	p.insertEvents(ctx, blockEv)
 	p.insertBlockSigns(blockEv)
+	p.evaluatePendingCycles(blockEv.Block.Height)
 }
 
 // handleCycleRotation is called when a rotating-cyclelist-with-next-query event is detected.
-// Records the cycle rotation to DB for historical tracking and missed reports calculation.
-// Missed reports are now calculated from DB: total cycles - reports per reporter.
+// It records the rotation and opens the protocol reporting window for that query.
 func (p *Processor) handleCycleRotation(ctx context.Context, height int64, blockTime time.Time, newQueryID string) {
+	if newQueryID == "" {
+		p.logger.Warn("cycle rotation has empty query ID", "height", height)
+		return
+	}
+
 	p.cycleMtx.Lock()
 	defer p.cycleMtx.Unlock()
 
-	// Check if this is the first cycle (no previous query to check)
-	if p.currentCycleQueryID == "" {
-		p.currentCycleQueryID = newQueryID
-		p.recordCycleRotation(ctx, height, blockTime, newQueryID)
-		p.logger.Info("first cycle detected, initializing cycle tracking",
-			"height", height,
-			"query_id", newQueryID,
-		)
-		return
-	}
-
-	// Same query ID - no rotation needed
-	if p.currentCycleQueryID == newQueryID {
-		return
-	}
-
-	// New cycle detected - record to DB
 	p.recordCycleRotation(ctx, height, blockTime, newQueryID)
+	p.pendingCycles = append(p.pendingCycles, pendingCycle{
+		queryID:     newQueryID,
+		startHeight: height,
+		reporters:   make(map[string]struct{}),
+	})
+}
 
-	// Count a missed report if our reporter did not submit in the cycle that just
-	// completed. WalletAddress is guaranteed non-empty (validated at startup).
-	if _, submitted := p.reportersInCurrentCycle[p.cfg.WalletAddress]; !submitted {
-		if _, known := p.knownReporters[p.cfg.WalletAddress]; known {
-			p.missedReports.Inc()
-			p.logger.Warn("our reporter missed submitting report in cycle",
-				"height", height,
-				"missed_query_id", p.currentCycleQueryID,
-				"new_query_id", newQueryID,
-				"reporter", p.cfg.WalletAddress,
-			)
+// evaluatePendingCycles judges each cycle only after its inclusive reporting
+// window has been processed.
+func (p *Processor) evaluatePendingCycles(height int64) {
+	p.cycleMtx.Lock()
+	defer p.cycleMtx.Unlock()
+
+	remaining := p.pendingCycles[:0]
+	for _, cycle := range p.pendingCycles {
+		if height < cycle.startHeight+cycleReportWindowBlocks {
+			remaining = append(remaining, cycle)
+			continue
 		}
+		if _, reported := cycle.reporters[p.cfg.WalletAddress]; reported {
+			continue
+		}
+		if _, known := p.knownReporters[p.cfg.WalletAddress]; !known {
+			continue
+		}
+		p.missedReports.Inc()
+		p.logger.Warn("our reporter missed submitting report in cycle",
+			"cycle_start_height", cycle.startHeight,
+			"missed_query_id", cycle.queryID,
+			"reporter", p.cfg.WalletAddress,
+		)
 	}
-
-	// Reset for new cycle
-	p.currentCycleQueryID = newQueryID
-	p.reportersInCurrentCycle = make(map[string]struct{})
+	p.pendingCycles = remaining
 }
 
 // recordCycleRotation buffers a cycle rotation event for batch insert.
@@ -308,13 +320,24 @@ func (p *Processor) recordCycleRotation(_ context.Context, height int64, blockTi
 	p.cycleRotationMtx.Unlock()
 }
 
-// markReporterReportedInCycle marks that a reporter has submitted a report in the current cycle.
-// Also adds to knownReporters to catch any new reporters that joined after startup.
-func (p *Processor) markReporterReportedInCycle(reporter string) {
+// markReporterReportedInCycle credits a report only to the pending cycle with
+// the same query ID. It also discovers reporters that joined after startup.
+func (p *Processor) markReporterReportedInCycle(height int64, queryID, reporter string) {
 	p.cycleMtx.Lock()
 	defer p.cycleMtx.Unlock()
 	p.knownReporters[reporter] = struct{}{}
-	p.reportersInCurrentCycle[reporter] = struct{}{}
+	for i := range p.pendingCycles {
+		if p.pendingCycles[i].queryID != queryID {
+			continue
+		}
+		if height < p.pendingCycles[i].startHeight {
+			continue
+		}
+		if height > p.pendingCycles[i].startHeight+cycleReportWindowBlocks {
+			continue
+		}
+		p.pendingCycles[i].reporters[reporter] = struct{}{}
+	}
 }
 
 const processedHeightsLimit = 1000
@@ -403,15 +426,20 @@ func (p *Processor) insertEvents(ctx context.Context, blockEv ctypes.EventDataNe
 		}
 	}
 
-	var _ string // currentQueryID removed; retained for future use if needed
+	// Register rotations first. FinalizeBlock can emit a report before or after
+	// its rotation event, but both belong to the same reporting window.
+	for _, ev := range allEvents {
+		if ev.Type != "rotating-cyclelist-with-next-query" {
+			continue
+		}
+		p.handleCycleRotation(ctx, height, blockTime, getAttribute(ev, AttrKeyQueryID))
+	}
+
 	for _, ev := range allEvents {
 		switch ev.Type {
 
-		// Cyclelist rotation event - indicates a new query cycle has started.
-		// Check if our reporter submitted in the previous cycle.
 		case "rotating-cyclelist-with-next-query":
-			newQueryID := getAttribute(ev, AttrKeyQueryID)
-			p.handleCycleRotation(ctx, height, blockTime, newQueryID)
+			continue
 
 		// Contains oracle data submission details. Used to track reporter activity.
 		case "new_report":
@@ -422,8 +450,13 @@ func (p *Processor) insertEvents(ctx context.Context, blockEv ctypes.EventDataNe
 				continue
 			}
 
-			// Track this reporter submitted a report in this cycle
-			p.markReporterReportedInCycle(report.Reporter)
+			queryID, err := EncodeQueryID(report.QueryId)
+			if err != nil {
+				p.logger.Error("failed to encode report query ID", "error", err)
+				monitor.IncError("reportQueryIDEncode", ComponentName)
+				continue
+			}
+			p.markReporterReportedInCycle(height, queryID, report.Reporter)
 
 			if err := p.storeReport(blockTime, *report); err != nil {
 				p.logger.Error("failed to store report", "error", err)
@@ -781,8 +814,8 @@ func (p *Processor) flushBlockSigns(ctx context.Context) error {
 
 // recordVoteExtSigs buffers the operators that signed each vote-extension
 // payload at this height into the same block_signs buffer, tagged by sig_type.
-// Only signers are written: absence of a row for a (height, sig_type) is what
-// counts as a miss, exactly as for consensus rows.
+// Signers and our own explicit miss are written. The zero row keeps ClickHouse
+// queries honest without having to infer our absence from a variable signer set.
 func (p *Processor) recordVoteExtSigs(voteExtTx *app.VoteExtTx, blockHeight int64, blockTime time.Time) {
 	sets := []struct {
 		sigType   string
@@ -819,6 +852,13 @@ func (p *Processor) recordVoteExtSigs(voteExtTx *app.VoteExtTx, blockHeight int6
 			})
 		}
 		if !ourSigFound && ourOperator != "" {
+			p.blockSignBuffer = append(p.blockSignBuffer, bufferedBlockSign{
+				blockHeight: blockHeight,
+				blockTime:   blockTime,
+				validator:   ourOperator,
+				signed:      0,
+				sigType:     set.sigType,
+			})
 			// Labelled with the consensus address so both signing paths report the
 			// same validator identity; the vote-extension payloads carry the
 			// operator address, which would otherwise split the series.
