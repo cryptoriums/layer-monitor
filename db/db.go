@@ -22,6 +22,16 @@ const (
 	TableNameAddresses      = "addresses"
 )
 
+// Signature types stored in TableNameBlockSigns.ColSigType. Consensus rows are
+// keyed by consensus address (tellorvalcons...); the vote-extension rows are
+// keyed by operator address (tellorvaloper...), since that is what the
+// vote-extension payloads carry. The type column disambiguates the two.
+const (
+	SigTypeConsensus         = "consensus"
+	SigTypeValsetSig         = "valset_sig"
+	SigTypeOracleAttestation = "oracle_attestation"
+)
+
 // Column names used across all tables.
 // Each column name is defined once and reused wherever that column appears.
 const (
@@ -54,6 +64,7 @@ const (
 	ColBlockTimestamp   = "block_timestamp"
 	ColValidatorAddress = "validator_address"
 	ColSigned           = "signed"
+	ColSigType          = "sig_type"
 
 	// Addresses table columns
 	ColName      = "name"
@@ -199,22 +210,37 @@ func initRewardsTable(ctx context.Context, database Db) error {
 	return err
 }
 
+// initBlockSignsTable holds every signature we track, one row per signer per
+// height, with sig_type saying which kind it is: consensus precommits plus the
+// vote-extension payloads (valset checkpoints, oracle attestations). Absence of
+// a row for a (height, sig_type) is what counts as a miss.
 func initBlockSignsTable(ctx context.Context, database Db) error {
 	query := fmt.Sprintf(`
 		CREATE TABLE IF NOT EXISTS %s (
 			%s UInt64,
 			%s DateTime64(3, 'UTC'),
 			%s String,
-			%s UInt8
+			%s UInt8,
+			%s LowCardinality(String) DEFAULT '%s'
 		)
 		ENGINE = MergeTree
 		PARTITION BY toYYYYMM(%s)
 		ORDER BY (%s, %s)
 	`, TableNameBlockSigns,
 		ColBlockHeight, ColBlockTimestamp, ColValidatorAddress, ColSigned,
+		ColSigType, SigTypeConsensus,
 		ColBlockTimestamp, ColBlockHeight, ColValidatorAddress)
 
-	_, err := database.Exec(ctx, query)
+	if _, err := database.Exec(ctx, query); err != nil {
+		return err
+	}
+
+	// Existing deployments predate sig_type; add it so their historic rows keep
+	// counting as consensus signatures.
+	alter := fmt.Sprintf(
+		"ALTER TABLE %s ADD COLUMN IF NOT EXISTS %s LowCardinality(String) DEFAULT '%s'",
+		TableNameBlockSigns, ColSigType, SigTypeConsensus)
+	_, err := database.Exec(ctx, alter)
 	return err
 }
 

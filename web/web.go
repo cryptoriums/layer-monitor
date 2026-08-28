@@ -36,6 +36,7 @@ import (
 	"github.com/cosmos/cosmos-sdk/codec"
 	codectypes "github.com/cosmos/cosmos-sdk/codec/types"
 	stakingtypes "github.com/cosmos/cosmos-sdk/x/staking/types"
+	"github.com/cosmos/gogoproto/jsonpb"
 )
 
 const (
@@ -1708,7 +1709,7 @@ func (s *Server) fetchSelectionsForReporter(ctx context.Context, reporterAddr st
 		}
 
 		var result reportertypes.QuerySelectionsToResponse
-		if err := s.cdc.UnmarshalJSON(body, &result); err != nil {
+		if err := unmarshalSelectionsJSON(body, &result); err != nil {
 			s.logger.Debug("selections decode error", "reporter", reporterAddr, "error", err)
 			continue
 		}
@@ -1721,6 +1722,13 @@ func (s *Server) fetchSelectionsForReporter(ctx context.Context, reporterAddr st
 	}
 
 	return selections
+}
+
+// unmarshalSelectionsJSON tolerates response fields added by newer Layer versions.
+// The monitor only reads concrete reporter types here, so no interface unpacking is needed.
+func unmarshalSelectionsJSON(body []byte, result *reportertypes.QuerySelectionsToResponse) error {
+	unmarshaler := jsonpb.Unmarshaler{AllowUnknownFields: true}
+	return unmarshaler.Unmarshal(strings.NewReader(string(body)), result)
 }
 
 // fetchDelegationsForSelector fetches all delegations for a selector.
@@ -1993,8 +2001,9 @@ func (s *Server) getMissedBlocksPerValidatorFromDB(ctx context.Context, periodDa
 	totalQuery := fmt.Sprintf(`
 		SELECT COUNT(DISTINCT %s)
 		FROM %s
-		WHERE %s >= now() - INTERVAL %d DAY
-	`, blockdb.ColBlockHeight, blockdb.TableNameBlockSigns, blockdb.ColBlockTimestamp, periodDays)
+		WHERE %s >= now() - INTERVAL %d DAY AND %s = '%s'
+	`, blockdb.ColBlockHeight, blockdb.TableNameBlockSigns, blockdb.ColBlockTimestamp, periodDays,
+		blockdb.ColSigType, blockdb.SigTypeConsensus)
 	var totalBlocks int64
 	if trows, err := s.db.Query(ctx, totalQuery); err == nil {
 		if trows.Next() {
@@ -2015,13 +2024,14 @@ func (s *Server) getMissedBlocksPerValidatorFromDB(ctx context.Context, periodDa
 			%s,
 			COUNT(DISTINCT %s) AS signed_blocks
 		FROM %s
-		WHERE %s >= now() - INTERVAL %d DAY AND %s = 1
+		WHERE %s >= now() - INTERVAL %d DAY AND %s = 1 AND %s = '%s'
 		GROUP BY %s
 	`,
 		blockdb.ColValidatorAddress,
 		blockdb.ColBlockHeight,
 		blockdb.TableNameBlockSigns,
 		blockdb.ColBlockTimestamp, periodDays, blockdb.ColSigned,
+		blockdb.ColSigType, blockdb.SigTypeConsensus,
 		blockdb.ColValidatorAddress,
 	)
 
