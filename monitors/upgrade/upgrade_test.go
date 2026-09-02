@@ -114,6 +114,8 @@ func TestUpgradeMetrics_NoUpgrade(t *testing.T) {
 	assertGauge(t, "proposed", m.proposed, 0)
 	assertGauge(t, "plan_height", m.planHeight, 0)
 	assertGauge(t, "blocks_remaining", m.blocksRemaining, 0)
+	assertGauge(t, "proposed_plan_height", m.proposedHeight, 0)
+	assertGauge(t, "proposed_blocks_remaining", m.proposedBlocks, 0)
 	assertGauge(t, "gov_proposals_voting", m.proposalsVoting, 0)
 }
 
@@ -153,6 +155,8 @@ func TestUpgradeMetrics_ProposalInVoting(t *testing.T) {
 	m.check(context.Background())
 
 	assertGauge(t, "proposed", m.proposed, 1)
+	assertGauge(t, "proposed_plan_height", m.proposedHeight, 999)
+	assertGauge(t, "proposed_blocks_remaining", m.proposedBlocks, 899)
 	assertGauge(t, "gov_proposals_voting", m.proposalsVoting, 1)
 	assertGauge(t, "pending", m.pending, 0)
 }
@@ -171,6 +175,21 @@ func TestUpgradeMetrics_GovProposalInVoting_NotUpgrade(t *testing.T) {
 
 	assertGauge(t, "gov_proposals_voting", m.proposalsVoting, 1)
 	assertGauge(t, "proposed", m.proposed, 0)
+	assertGauge(t, "proposed_plan_height", m.proposedHeight, 0)
+	assertGauge(t, "proposed_blocks_remaining", m.proposedBlocks, 0)
+}
+
+func TestUpgradeMetrics_ProposalPastHeight_RemainingZero(t *testing.T) {
+	mc := &mockChain{t: t, cdc: encoding.MakeCodec(), height: 1000, proposals: upgradeProposalResp(t, "v3")}
+	srv := mc.server()
+	defer srv.Close()
+
+	m := newTestMonitor(t, srv.URL)
+	m.check(context.Background())
+
+	assertGauge(t, "proposed", m.proposed, 1)
+	assertGauge(t, "proposed_plan_height", m.proposedHeight, 999)
+	assertGauge(t, "proposed_blocks_remaining", m.proposedBlocks, 0)
 }
 
 func TestUpgradeMetrics_QueryErrorKeepsPreviousPending(t *testing.T) {
