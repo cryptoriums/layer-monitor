@@ -397,6 +397,12 @@ func (w *gzipResponseWriter) Write(b []byte) (int, error) {
 }
 
 func (s *Server) handleRoot(w http.ResponseWriter, r *http.Request) {
+	// The page is regenerated on every request and its markup changes with each deploy, so
+	// it must never be cached. Without an explicit header, browsers (mobile especially)
+	// apply heuristic caching and can serve a stale page for days - which shows outdated
+	// numbers and, worse, keeps rendering an old asset layout after a deploy.
+	w.Header().Set("Cache-Control", "no-store, must-revalidate")
+
 	ctx := r.Context()
 
 	// Non-blocking: get whatever is in cache, don't wait for building
