@@ -3,6 +3,7 @@ package web
 import (
 	"compress/gzip"
 	"context"
+	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/base64"
@@ -71,6 +72,9 @@ type Config struct {
 }
 
 type Server struct {
+	assetVerOnce sync.Once
+	assetVer     string
+
 	cfg        Config
 	logger     log.Logger
 	db         blockdb.Db
@@ -350,11 +354,15 @@ func (s *Server) routes() http.Handler {
 
 // handleAssets serves static files (CSS, JS, images) with aggressive caching and gzip compression.
 func (s *Server) handleAssets(w http.ResponseWriter, r *http.Request) {
-	// Asset URLs are unversioned (e.g. /assets/script.js), so we cannot use
-	// `immutable` — that would pin the old content in browsers across deploys.
-	// `no-cache` forces revalidation on every request, which is cheap because
-	// the ETag below returns 304 when the file is unchanged.
-	w.Header().Set("Cache-Control", "no-cache, must-revalidate")
+	// Asset URLs are versioned by the template (/assets/script.js?v=<hash>), so a pinned
+	// request can be cached hard: its content cannot change without the URL changing.
+	// Unversioned requests - a direct hit, or an old cached page - still revalidate, which
+	// is cheap because the ETag below returns 304 when the file is unchanged.
+	if r.URL.Query().Get("v") != "" {
+		w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+	} else {
+		w.Header().Set("Cache-Control", "no-cache, must-revalidate")
+	}
 	w.Header().Set("Vary", "Accept-Encoding")
 
 	fs := http.FileServer(http.Dir(assetsDir))
@@ -396,7 +404,34 @@ func (w *gzipResponseWriter) Write(b []byte) (int, error) {
 	return w.Writer.Write(b)
 }
 
+// assetVersion returns a short content hash over the served assets, used to version their
+// URLs (/assets/script.js?v=<hash>). It changes exactly when an asset changes, so a deploy
+// invalidates browser caches while unchanged assets stay cached. Memoised; if an asset
+// cannot be read it falls back to the process start time, which is still unique per deploy.
+func (s *Server) assetVersion() string {
+	s.assetVerOnce.Do(func() {
+		h := sha256.New()
+		for _, n := range []string{"style.css", "script.js"} {
+			b, err := os.ReadFile(filepath.Join(assetsDir, n))
+			if err != nil {
+				s.assetVer = strconv.FormatInt(time.Now().Unix(), 10)
+				return
+			}
+			h.Write(b)
+		}
+		s.assetVer = hex.EncodeToString(h.Sum(nil))[:12]
+	})
+	return s.assetVer
+}
+
 func (s *Server) handleRoot(w http.ResponseWriter, r *http.Request) {
+	// The HTML carries the versioned asset URLs, so it must be revalidated rather than
+	// served from cache - otherwise an old page keeps requesting old asset versions.
+	// Browsers given no header at all apply heuristic caching and held this page for days.
+	// The page is cheap to regenerate; the assets it points at are the expensive part and
+	// those are cached hard, busted by their ?v= hash.
+	w.Header().Set("Cache-Control", "no-cache, must-revalidate")
+
 	ctx := r.Context()
 
 	// Non-blocking: get whatever is in cache, don't wait for building
@@ -470,6 +505,7 @@ func (s *Server) handleRoot(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := tpl.Execute(w, map[string]any{
+		"AssetVersion":      s.assetVersion(),
 		"ValidatorTree":     validatorTree,
 		"TreeCacheTime":     cacheTimeStr,
 		"TreeLoading":       isLoading,
