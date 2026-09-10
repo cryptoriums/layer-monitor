@@ -18,6 +18,7 @@ import (
 	"github.com/cryptoriums/layer-monitor/monitors/balance"
 	"github.com/cryptoriums/layer-monitor/monitors/block"
 	"github.com/cryptoriums/layer-monitor/monitors/domain"
+	"github.com/cryptoriums/layer-monitor/monitors/health"
 	"github.com/cryptoriums/layer-monitor/monitors/jail"
 	"github.com/cryptoriums/layer-monitor/signerclient"
 	"github.com/cryptoriums/layer-monitor/web"
@@ -205,6 +206,28 @@ func runMonitor(cmd *cobra.Command, _ []string) {
 	go func() {
 		if err := jailMonitor.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
 			logger.Error("jail monitor stopped with error", "error", err)
+		}
+	}()
+
+	// Public endpoint first, ours second: whether the chain is progressing is public
+	// data, and querying only our own node meant these metrics went blind exactly when
+	// that node was down - and a blank panel reads the same as a healthy one.
+	healthRPCURLs := cfg.rpcNodes
+	if cfg.publicRPCURL != "" {
+		healthRPCURLs = append([]string{cfg.publicRPCURL}, cfg.rpcNodes...)
+	}
+	healthMonitor, err := health.New(logger, health.Config{
+		LayerRPCURLs:  healthRPCURLs,
+		LayerAPIURLs:  cfg.layerAPIURLs,
+		WalletAddress: walletAddress,
+	}, reg)
+	if err != nil {
+		logger.Error("failed to create health monitor", "error", err)
+		os.Exit(1)
+	}
+	go func() {
+		if err := healthMonitor.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
+			logger.Error("health monitor stopped with error", "error", err)
 		}
 	}()
 
