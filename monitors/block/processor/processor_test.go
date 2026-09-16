@@ -10,10 +10,12 @@ import (
 	_ "github.com/chdb-io/chdb-go/chdb/driver"
 	abci "github.com/cometbft/cometbft/abci/types"
 	ctypes "github.com/cometbft/cometbft/types"
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
 	blockdb "github.com/cryptoriums/layer-monitor/db"
 	cryptolog "github.com/cryptoriums/layer-monitor/log"
+	"github.com/prometheus/client_golang/prometheus/testutil"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	"github.com/tellor-io/layer/app"
 )
 
 // setupTestDB creates an in-memory chdb database for testing.
@@ -1100,6 +1102,30 @@ func TestProcessBlock_ValidatorRewardEvents(t *testing.T) {
 	assert.Equal(t, int64(100), delRecords[0].BlockHeight)
 }
 
+func TestRecordVoteExtSigs_RecordsOurExplicitMiss(t *testing.T) {
+	p := NewWithConfig(context.Background(), cryptolog.New(), nil, ProcessorConfig{
+		WalletAddress:             "tellor128m9knt3039k5rmaeu50q0g7y608g2w5etj2ra",
+		ValidatorConsensusAddress: "tellorvalcons1ourvalidator",
+	})
+	voteExtTx := &app.VoteExtTx{
+		OracleAttestations: app.OracleAttestations{
+			OperatorAddresses: []string{"tellorvaloper1another"},
+		},
+	}
+
+	p.recordVoteExtSigs(voteExtTx, 123, time.Now())
+
+	require.Len(t, p.blockSignBuffer, 2)
+	assert.Equal(t, "tellorvaloper1another", p.blockSignBuffer[0].validator)
+	assert.Equal(t, uint8(1), p.blockSignBuffer[0].signed)
+	assert.Equal(t, "tellorvaloper128m9knt3039k5rmaeu50q0g7y608g2w5vy7c6d", p.blockSignBuffer[1].validator)
+	assert.Equal(t, uint8(0), p.blockSignBuffer[1].signed)
+	assert.Equal(t, blockdb.SigTypeOracleAttestation, p.blockSignBuffer[1].sigType)
+	assert.Equal(t, float64(1), testutil.ToFloat64(
+		p.missedBlocks.WithLabelValues("tellorvalcons1ourvalidator", blockdb.SigTypeOracleAttestation),
+	))
+}
+
 // ============================================================================
 // Cycle Rotation Tests
 // ============================================================================
@@ -1138,7 +1164,9 @@ func fetchCycleRotations(t *testing.T, db blockdb.SQLDB) []cycleRotationRecord {
 func setupCycleTestProcessor(t *testing.T) (*Processor, blockdb.SQLDB) {
 	t.Helper()
 	db := setupTestDB(t)
-	p := New(context.Background(), cryptolog.New(), db)
+	p := NewWithConfig(context.Background(), cryptolog.New(), db, ProcessorConfig{
+		WalletAddress: "tellor1ourreporter",
+	})
 	return p, db
 }
 
@@ -1147,18 +1175,15 @@ func TestHandleCycleRotation_FirstCycle(t *testing.T) {
 	p, db := setupCycleTestProcessor(t)
 	blockTime := time.Now()
 
-	// First cycle - should initialize without warning
 	p.handleCycleRotation(ctx, 100, blockTime, "query-id-1")
 	require.NoError(t, p.Flush(ctx))
 
-	// Verify cycle was recorded
 	records := fetchCycleRotations(t, db)
 	require.Len(t, records, 1)
 	assert.Equal(t, int64(100), records[0].BlockHeight)
 	assert.Equal(t, "query-id-1", records[0].QueryID)
-
-	// Verify internal state was set
-	assert.Equal(t, "query-id-1", p.currentCycleQueryID)
+	require.Len(t, p.pendingCycles, 1)
+	assert.Equal(t, int64(100), p.pendingCycles[0].startHeight)
 }
 
 func TestHandleCycleRotation_NormalRotation(t *testing.T) {
@@ -1166,14 +1191,10 @@ func TestHandleCycleRotation_NormalRotation(t *testing.T) {
 	p, db := setupCycleTestProcessor(t)
 	blockTime := time.Now()
 
-	// First cycle
 	p.handleCycleRotation(ctx, 100, blockTime, "query-id-1")
-
-	// Second cycle - normal rotation
 	p.handleCycleRotation(ctx, 200, blockTime.Add(time.Minute), "query-id-2")
 	require.NoError(t, p.Flush(ctx))
 
-	// Verify both cycles were recorded
 	records := fetchCycleRotations(t, db)
 	require.Len(t, records, 2)
 	assert.Equal(t, int64(100), records[0].BlockHeight)
@@ -1181,121 +1202,53 @@ func TestHandleCycleRotation_NormalRotation(t *testing.T) {
 	assert.Equal(t, int64(200), records[1].BlockHeight)
 	assert.Equal(t, "query-id-2", records[1].QueryID)
 
-	// Verify internal state was updated
-	assert.Equal(t, "query-id-2", p.currentCycleQueryID)
+	assert.Len(t, p.pendingCycles, 2)
 }
 
-func TestHandleCycleRotation_ResetsReportersInCycle(t *testing.T) {
+func TestPendingCycle_ReportMatchesQueryID(t *testing.T) {
 	ctx := context.Background()
 	p, _ := setupCycleTestProcessor(t)
 	blockTime := time.Now()
 
-	// First cycle
 	p.handleCycleRotation(ctx, 100, blockTime, "query-id-1")
+	p.handleCycleRotation(ctx, 102, blockTime.Add(2*time.Second), "query-id-2")
+	p.markReporterReportedInCycle(103, "query-id-2", "tellor1ourreporter")
 
-	// Mark reporters as having reported in cycle
-	p.markReporterReportedInCycle("tellor1reporter1")
-	p.markReporterReportedInCycle("tellor1reporter2")
+	p.evaluatePendingCycles(106)
+	assert.Equal(t, float64(1), testutil.ToFloat64(p.missedReports))
+	require.Len(t, p.pendingCycles, 1)
+	assert.Equal(t, "query-id-2", p.pendingCycles[0].queryID)
 
-	// Verify reporters are tracked
-	assert.Len(t, p.reportersInCurrentCycle, 2)
-
-	// Rotate to next cycle - should reset reporters
-	p.handleCycleRotation(ctx, 200, blockTime.Add(time.Minute), "query-id-2")
-
-	// Verify reporters map was reset
-	assert.Len(t, p.reportersInCurrentCycle, 0)
+	p.evaluatePendingCycles(108)
+	assert.Equal(t, float64(1), testutil.ToFloat64(p.missedReports))
+	assert.Empty(t, p.pendingCycles)
 }
 
-func TestHandleCycleRotation_SameQueryID_NoRotation(t *testing.T) {
-	ctx := context.Background()
-	p, db := setupCycleTestProcessor(t)
-	blockTime := time.Now()
-
-	// First cycle
-	p.handleCycleRotation(ctx, 100, blockTime, "query-id-1")
-
-	// Mark a reporter
-	p.markReporterReportedInCycle("tellor1reporter1")
-	assert.Len(t, p.reportersInCurrentCycle, 1)
-
-	// Same query ID - should NOT rotate or reset reporters
-	p.handleCycleRotation(ctx, 101, blockTime.Add(time.Second), "query-id-1")
-	require.NoError(t, p.Flush(ctx))
-
-	// Verify only one cycle was recorded (no duplicate)
-	records := fetchCycleRotations(t, db)
-	require.Len(t, records, 1)
-
-	// Verify reporters were NOT reset
-	assert.Len(t, p.reportersInCurrentCycle, 1)
-}
-
-func TestMarkReporterReportedInCycle(t *testing.T) {
+func TestPendingCycle_AcceptsReportAtInclusiveWindowEnd(t *testing.T) {
 	ctx := context.Background()
 	p, _ := setupCycleTestProcessor(t)
-	blockTime := time.Now()
+	p.handleCycleRotation(ctx, 100, time.Now(), "query-id-1")
+	p.markReporterReportedInCycle(106, "query-id-1", "tellor1ourreporter")
 
-	// Initialize first cycle
-	p.handleCycleRotation(ctx, 100, blockTime, "query-id-1")
+	p.evaluatePendingCycles(106)
 
-	// Mark reporter
-	p.markReporterReportedInCycle("tellor1reporter1")
-
-	// Verify reporter is tracked
-	_, ok := p.reportersInCurrentCycle["tellor1reporter1"]
-	assert.True(t, ok, "reporter should be tracked in current cycle")
-
-	// Verify reporter is added to known reporters
-	_, known := p.knownReporters["tellor1reporter1"]
-	assert.True(t, known, "reporter should be added to known reporters")
+	assert.Equal(t, float64(0), testutil.ToFloat64(p.missedReports))
+	assert.Empty(t, p.pendingCycles)
 }
 
-func TestMarkReporterReportedInCycle_MultipleSameReporter(t *testing.T) {
+func TestPendingCycle_WaitsForFullWindow(t *testing.T) {
 	ctx := context.Background()
 	p, _ := setupCycleTestProcessor(t)
-	blockTime := time.Now()
+	p.markReporterReportedInCycle(99, "earlier-query", "tellor1ourreporter")
+	p.handleCycleRotation(ctx, 100, time.Now(), "query-id-1")
 
-	// Initialize first cycle
-	p.handleCycleRotation(ctx, 100, blockTime, "query-id-1")
+	p.evaluatePendingCycles(105)
+	assert.Equal(t, float64(0), testutil.ToFloat64(p.missedReports))
+	require.Len(t, p.pendingCycles, 1)
 
-	// Mark same reporter multiple times (should not cause issues)
-	p.markReporterReportedInCycle("tellor1reporter1")
-	p.markReporterReportedInCycle("tellor1reporter1")
-	p.markReporterReportedInCycle("tellor1reporter1")
-
-	// Verify only one entry exists
-	assert.Len(t, p.reportersInCurrentCycle, 1)
-	assert.Len(t, p.knownReporters, 1)
-}
-
-func TestMarkReporterReportedInCycle_MultipleReporters(t *testing.T) {
-	ctx := context.Background()
-	p, _ := setupCycleTestProcessor(t)
-	blockTime := time.Now()
-
-	// Initialize first cycle
-	p.handleCycleRotation(ctx, 100, blockTime, "query-id-1")
-
-	// Mark multiple different reporters
-	reporters := []string{
-		"tellor1reporter1",
-		"tellor1reporter2",
-		"tellor1reporter3",
-		"tellor1reporter4",
-	}
-	for _, r := range reporters {
-		p.markReporterReportedInCycle(r)
-	}
-
-	// Verify all reporters are tracked
-	assert.Len(t, p.reportersInCurrentCycle, 4)
-	assert.Len(t, p.knownReporters, 4)
-
-	for _, r := range reporters {
-		_, ok := p.reportersInCurrentCycle[r]
-		assert.True(t, ok, "reporter %s should be tracked", r)
-	}
+	p.evaluatePendingCycles(106)
+	assert.Equal(t, float64(1), testutil.ToFloat64(p.missedReports))
+	assert.Empty(t, p.pendingCycles)
 }
 
 func TestRecordCycleRotation_WritesToDB(t *testing.T) {
@@ -1312,30 +1265,4 @@ func TestRecordCycleRotation_WritesToDB(t *testing.T) {
 	require.Len(t, records, 1)
 	assert.Equal(t, int64(12345), records[0].BlockHeight)
 	assert.Equal(t, "test-query-id-abc123", records[0].QueryID)
-}
-
-func TestHandleCycleRotation_KnownReportersPersist(t *testing.T) {
-	ctx := context.Background()
-	p, _ := setupCycleTestProcessor(t)
-	blockTime := time.Now()
-
-	// First cycle
-	p.handleCycleRotation(ctx, 100, blockTime, "query-id-1")
-	p.markReporterReportedInCycle("tellor1reporter1")
-
-	// Second cycle
-	p.handleCycleRotation(ctx, 200, blockTime.Add(time.Minute), "query-id-2")
-	p.markReporterReportedInCycle("tellor1reporter2")
-
-	// Verify knownReporters accumulates across cycles
-	assert.Len(t, p.knownReporters, 2)
-	_, known1 := p.knownReporters["tellor1reporter1"]
-	_, known2 := p.knownReporters["tellor1reporter2"]
-	assert.True(t, known1, "reporter1 should be in known reporters")
-	assert.True(t, known2, "reporter2 should be in known reporters")
-
-	// But reportersInCurrentCycle only has current cycle's reporter
-	assert.Len(t, p.reportersInCurrentCycle, 1)
-	_, inCurrent := p.reportersInCurrentCycle["tellor1reporter2"]
-	assert.True(t, inCurrent, "only reporter2 should be in current cycle")
 }

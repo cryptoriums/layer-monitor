@@ -10,11 +10,13 @@ import (
 
 	abci "github.com/cometbft/cometbft/abci/types"
 	ctypes "github.com/cometbft/cometbft/types"
+	cryptoaddr "github.com/cryptoriums/layer-monitor/addr"
 	blockdb "github.com/cryptoriums/layer-monitor/db"
 	monitor "github.com/cryptoriums/layer-monitor/metrics"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
 	"github.com/shopspring/decimal"
+	"github.com/tellor-io/layer/app"
 	"github.com/tellor-io/layer/x/oracle/types"
 
 	"cosmossdk.io/log"
@@ -69,7 +71,22 @@ type bufferedBlockSign struct {
 	blockTime   time.Time
 	validator   string
 	signed      uint8
+	// sigType is which kind of signature this row records: consensus precommit,
+	// valset checkpoint or oracle attestation. Consensus rows carry a consensus
+	// address; the vote-extension rows carry an operator address.
+	sigType string
 }
+
+// pendingCycle is a cycle whose six-block reporting window is still open.
+// Reports are matched by query ID because several cycles can be pending at the
+// same time and a report for one cycle must not hide a miss in another.
+type pendingCycle struct {
+	queryID     string
+	startHeight int64
+	reporters   map[string]struct{}
+}
+
+const cycleReportWindowBlocks = 6
 
 // bufferedReport represents a buffered oracle report for batch insert into the reports table.
 type bufferedReport struct {
@@ -134,10 +151,9 @@ type Processor struct {
 	heightQueue      []int64
 
 	// Cycle-based reporter tracking for all reporters
-	cycleMtx                sync.Mutex
-	currentCycleQueryID     string
-	knownReporters          map[string]struct{} // All reporters who have ever submitted
-	reportersInCurrentCycle map[string]struct{} // Reporters who submitted in current cycle
+	cycleMtx       sync.Mutex
+	knownReporters map[string]struct{} // All reporters who have ever submitted
+	pendingCycles  []pendingCycle
 
 	// Cumulative amount tracking for reward increment calculation.
 	// Maps reporter address -> last known cumulative amount.
@@ -153,6 +169,14 @@ type Processor struct {
 	blockSignBuffer []bufferedBlockSign
 	blockSignMtx    sync.Mutex
 
+	// Position of our validator within LastCommit.Signatures, learned from blocks we
+	// did sign. CometBFT zeroes ValidatorAddress on an absent vote, so a miss cannot be
+	// attributed by address — only by index. ourSigSetSize records the commit size when
+	// the index was learned; a different size means the set changed and the index is
+	// stale, so it is discarded rather than trusted. See insertBlockSigns.
+	ourSigIndex   int // -1 when not yet learned
+	ourSigSetSize int
+
 	// Batch insert buffer for oracle reports.
 	reportBuffer []bufferedReport
 	reportMtx    sync.Mutex
@@ -166,9 +190,10 @@ type Processor struct {
 	cycleRotationMtx    sync.Mutex
 
 	// The only two metrics this processor exposes, both for our own node:
-	//   missedBlocks  — block signatures our validator missed while in the active set
+	//   missedBlocks  — signatures our validator missed, labelled by sig type
+	//                   (consensus, valset_sig, oracle_attestation)
 	//   missedReports — reporter cycles our reporter missed
-	missedBlocks  prometheus.Counter
+	missedBlocks  *prometheus.CounterVec
 	missedReports prometheus.Counter
 }
 
@@ -190,26 +215,34 @@ func NewWithConfig(
 	cfg ProcessorConfig,
 ) *Processor {
 	p := &Processor{
-		logger:                  logger.With("component", ComponentName),
-		db:                      db,
-		txDecoder:               NewTxDecoder(),
-		httpClient:              &http.Client{Timeout: 10 * time.Second},
-		cfg:                     cfg,
-		processedHeights:        make(map[int64]struct{}),
-		knownReporters:          make(map[string]struct{}),
-		reportersInCurrentCycle: make(map[string]struct{}),
+		logger:           logger.With("component", ComponentName),
+		db:               db,
+		txDecoder:        NewTxDecoder(),
+		httpClient:       &http.Client{Timeout: 10 * time.Second},
+		cfg:              cfg,
+		processedHeights: make(map[int64]struct{}),
+		knownReporters:   make(map[string]struct{}),
+		ourSigIndex:      -1, // not yet learned; 0 is a valid index
 	}
 	if cfg.Registerer == nil {
 		// Use an isolated registry by default to avoid duplicate registration
 		// when multiple processors are created in tests.
 		cfg.Registerer = prometheus.NewRegistry()
 	}
-	p.missedBlocks = promauto.With(cfg.Registerer).NewCounter(prometheus.CounterOpts{
+	p.missedBlocks = promauto.With(cfg.Registerer).NewCounterVec(prometheus.CounterOpts{
 		Namespace: monitor.MetricsNamespace,
 		Subsystem: "processor",
 		Name:      "missed_our_validator_blocks_total",
-		Help:      "Total block signatures our validator missed while in the active set",
-	})
+		Help: "Total signatures our validator missed, by validator and type: consensus " +
+			"precommits, valset checkpoints and oracle attestations",
+	}, []string{"validator", "type"})
+	for _, sigType := range []string{
+		blockdb.SigTypeConsensus,
+		blockdb.SigTypeValsetSig,
+		blockdb.SigTypeOracleAttestation,
+	} {
+		p.missedBlocks.WithLabelValues(cfg.ValidatorConsensusAddress, sigType)
+	}
 	p.missedReports = promauto.With(cfg.Registerer).NewCounter(prometheus.CounterOpts{
 		Namespace: monitor.MetricsNamespace,
 		Subsystem: "processor",
@@ -232,51 +265,54 @@ func (p *Processor) ProcessBlock(ctx context.Context, blockEv ctypes.EventDataNe
 	p.insertTx(blockEv)
 	p.insertEvents(ctx, blockEv)
 	p.insertBlockSigns(blockEv)
+	p.evaluatePendingCycles(blockEv.Block.Height)
 }
 
 // handleCycleRotation is called when a rotating-cyclelist-with-next-query event is detected.
-// Records the cycle rotation to DB for historical tracking and missed reports calculation.
-// Missed reports are now calculated from DB: total cycles - reports per reporter.
+// It records the rotation and opens the protocol reporting window for that query.
 func (p *Processor) handleCycleRotation(ctx context.Context, height int64, blockTime time.Time, newQueryID string) {
+	if newQueryID == "" {
+		p.logger.Warn("cycle rotation has empty query ID", "height", height)
+		return
+	}
+
 	p.cycleMtx.Lock()
 	defer p.cycleMtx.Unlock()
 
-	// Check if this is the first cycle (no previous query to check)
-	if p.currentCycleQueryID == "" {
-		p.currentCycleQueryID = newQueryID
-		p.recordCycleRotation(ctx, height, blockTime, newQueryID)
-		p.logger.Info("first cycle detected, initializing cycle tracking",
-			"height", height,
-			"query_id", newQueryID,
-		)
-		return
-	}
-
-	// Same query ID - no rotation needed
-	if p.currentCycleQueryID == newQueryID {
-		return
-	}
-
-	// New cycle detected - record to DB
 	p.recordCycleRotation(ctx, height, blockTime, newQueryID)
+	p.pendingCycles = append(p.pendingCycles, pendingCycle{
+		queryID:     newQueryID,
+		startHeight: height,
+		reporters:   make(map[string]struct{}),
+	})
+}
 
-	// Count a missed report if our reporter did not submit in the cycle that just
-	// completed. WalletAddress is guaranteed non-empty (validated at startup).
-	if _, submitted := p.reportersInCurrentCycle[p.cfg.WalletAddress]; !submitted {
-		if _, known := p.knownReporters[p.cfg.WalletAddress]; known {
-			p.missedReports.Inc()
-			p.logger.Warn("our reporter missed submitting report in cycle",
-				"height", height,
-				"missed_query_id", p.currentCycleQueryID,
-				"new_query_id", newQueryID,
-				"reporter", p.cfg.WalletAddress,
-			)
+// evaluatePendingCycles judges each cycle only after its inclusive reporting
+// window has been processed.
+func (p *Processor) evaluatePendingCycles(height int64) {
+	p.cycleMtx.Lock()
+	defer p.cycleMtx.Unlock()
+
+	remaining := p.pendingCycles[:0]
+	for _, cycle := range p.pendingCycles {
+		if height < cycle.startHeight+cycleReportWindowBlocks {
+			remaining = append(remaining, cycle)
+			continue
 		}
+		if _, reported := cycle.reporters[p.cfg.WalletAddress]; reported {
+			continue
+		}
+		if _, known := p.knownReporters[p.cfg.WalletAddress]; !known {
+			continue
+		}
+		p.missedReports.Inc()
+		p.logger.Warn("our reporter missed submitting report in cycle",
+			"cycle_start_height", cycle.startHeight,
+			"missed_query_id", cycle.queryID,
+			"reporter", p.cfg.WalletAddress,
+		)
 	}
-
-	// Reset for new cycle
-	p.currentCycleQueryID = newQueryID
-	p.reportersInCurrentCycle = make(map[string]struct{})
+	p.pendingCycles = remaining
 }
 
 // recordCycleRotation buffers a cycle rotation event for batch insert.
@@ -291,13 +327,24 @@ func (p *Processor) recordCycleRotation(_ context.Context, height int64, blockTi
 	p.cycleRotationMtx.Unlock()
 }
 
-// markReporterReportedInCycle marks that a reporter has submitted a report in the current cycle.
-// Also adds to knownReporters to catch any new reporters that joined after startup.
-func (p *Processor) markReporterReportedInCycle(reporter string) {
+// markReporterReportedInCycle credits a report only to the pending cycle with
+// the same query ID. It also discovers reporters that joined after startup.
+func (p *Processor) markReporterReportedInCycle(height int64, queryID, reporter string) {
 	p.cycleMtx.Lock()
 	defer p.cycleMtx.Unlock()
 	p.knownReporters[reporter] = struct{}{}
-	p.reportersInCurrentCycle[reporter] = struct{}{}
+	for i := range p.pendingCycles {
+		if p.pendingCycles[i].queryID != queryID {
+			continue
+		}
+		if height < p.pendingCycles[i].startHeight {
+			continue
+		}
+		if height > p.pendingCycles[i].startHeight+cycleReportWindowBlocks {
+			continue
+		}
+		p.pendingCycles[i].reporters[reporter] = struct{}{}
+	}
 }
 
 const processedHeightsLimit = 1000
@@ -331,7 +378,10 @@ func (p *Processor) insertTx(blockEv ctypes.EventDataNewBlock) {
 		raw := txs[i]
 
 		if voteExtTx, ok := ParseVoteExtensionTx(raw); ok {
-			p.logger.Debug("skipping vote extension tx", "height", voteExtTx.BlockHeight)
+			// Vote extensions carry no fees/messages, so they are not decoded as
+			// normal txs, but they do tell us which operators signed the valset
+			// checkpoint and the oracle attestations at this height.
+			p.recordVoteExtSigs(voteExtTx, blockEv.Block.Height, blockEv.Block.Time)
 			continue
 		}
 
@@ -383,15 +433,20 @@ func (p *Processor) insertEvents(ctx context.Context, blockEv ctypes.EventDataNe
 		}
 	}
 
-	var _ string // currentQueryID removed; retained for future use if needed
+	// Register rotations first. FinalizeBlock can emit a report before or after
+	// its rotation event, but both belong to the same reporting window.
+	for _, ev := range allEvents {
+		if ev.Type != "rotating-cyclelist-with-next-query" {
+			continue
+		}
+		p.handleCycleRotation(ctx, height, blockTime, getAttribute(ev, AttrKeyQueryID))
+	}
+
 	for _, ev := range allEvents {
 		switch ev.Type {
 
-		// Cyclelist rotation event - indicates a new query cycle has started.
-		// Check if our reporter submitted in the previous cycle.
 		case "rotating-cyclelist-with-next-query":
-			newQueryID := getAttribute(ev, AttrKeyQueryID)
-			p.handleCycleRotation(ctx, height, blockTime, newQueryID)
+			continue
 
 		// Contains oracle data submission details. Used to track reporter activity.
 		case "new_report":
@@ -402,8 +457,13 @@ func (p *Processor) insertEvents(ctx context.Context, blockEv ctypes.EventDataNe
 				continue
 			}
 
-			// Track this reporter submitted a report in this cycle
-			p.markReporterReportedInCycle(report.Reporter)
+			queryID, err := EncodeQueryID(report.QueryId)
+			if err != nil {
+				p.logger.Error("failed to encode report query ID", "error", err)
+				monitor.IncError("reportQueryIDEncode", ComponentName)
+				continue
+			}
+			p.markReporterReportedInCycle(height, queryID, report.Reporter)
 
 			if err := p.storeReport(blockTime, *report); err != nil {
 				p.logger.Error("failed to store report", "error", err)
@@ -736,13 +796,14 @@ func (p *Processor) flushBlockSigns(ctx context.Context) error {
 	var values []string
 	var args []any
 	for _, r := range records {
-		values = append(values, "(?, ?, ?, ?)")
-		args = append(args, r.blockHeight, r.blockTime, r.validator, r.signed)
+		values = append(values, "(?, ?, ?, ?, ?)")
+		args = append(args, r.blockHeight, r.blockTime, r.validator, r.signed, r.sigType)
 	}
 
-	query := fmt.Sprintf("INSERT INTO %s (%s, %s, %s, %s) VALUES %s",
+	query := fmt.Sprintf("INSERT INTO %s (%s, %s, %s, %s, %s) VALUES %s",
 		blockdb.TableNameBlockSigns,
 		blockdb.ColBlockHeight, blockdb.ColBlockTimestamp, blockdb.ColValidatorAddress, blockdb.ColSigned,
+		blockdb.ColSigType,
 		strings.Join(values, ", "))
 
 	insertCtx, cancel := context.WithTimeout(ctx, DefaultDBTimeout*10)
@@ -756,6 +817,61 @@ func (p *Processor) flushBlockSigns(ctx context.Context) error {
 
 	p.logger.Debug("batch inserted block_signs", "count", len(records))
 	return nil
+}
+
+// recordVoteExtSigs buffers the operators that signed each vote-extension
+// payload at this height into the same block_signs buffer, tagged by sig_type.
+// Signers and our own explicit miss are written. The zero row keeps ClickHouse
+// queries honest without having to infer our absence from a variable signer set.
+func (p *Processor) recordVoteExtSigs(voteExtTx *app.VoteExtTx, blockHeight int64, blockTime time.Time) {
+	sets := []struct {
+		sigType   string
+		operators []string
+	}{
+		{blockdb.SigTypeValsetSig, voteExtTx.ValsetSigs.OperatorAddresses},
+		{blockdb.SigTypeOracleAttestation, voteExtTx.OracleAttestations.OperatorAddresses},
+	}
+
+	ourOperator := cryptoaddr.ToValidatorOperator(p.cfg.WalletAddress)
+
+	p.blockSignMtx.Lock()
+	defer p.blockSignMtx.Unlock()
+	for _, set := range sets {
+		if len(set.operators) == 0 {
+			// No payload of this kind at this height (valset checkpoints only
+			// appear on validator-set changes), so nobody could have missed it.
+			continue
+		}
+		ourSigFound := false
+		for _, op := range set.operators {
+			if op == "" {
+				continue
+			}
+			if op == ourOperator {
+				ourSigFound = true
+			}
+			p.blockSignBuffer = append(p.blockSignBuffer, bufferedBlockSign{
+				blockHeight: blockHeight,
+				blockTime:   blockTime,
+				validator:   op,
+				signed:      1,
+				sigType:     set.sigType,
+			})
+		}
+		if !ourSigFound && ourOperator != "" {
+			p.blockSignBuffer = append(p.blockSignBuffer, bufferedBlockSign{
+				blockHeight: blockHeight,
+				blockTime:   blockTime,
+				validator:   ourOperator,
+				signed:      0,
+				sigType:     set.sigType,
+			})
+			// Labelled with the consensus address so both signing paths report the
+			// same validator identity; the vote-extension payloads carry the
+			// operator address, which would otherwise split the series.
+			p.missedBlocks.WithLabelValues(p.cfg.ValidatorConsensusAddress, set.sigType).Inc()
+		}
+	}
 }
 
 // flushReports writes buffered oracle reports to the database using batch INSERT.
@@ -943,8 +1059,14 @@ func (p *Processor) insertBlockSigns(blockEv ctypes.EventDataNewBlock) {
 	// The signatures are for block at height-1
 	commitHeight := currentHeight - 1
 	blockTime := blockEv.Block.Time
-	for _, sig := range blockEv.Block.LastCommit.Signatures {
-		// Skip empty signatures (validator not in set at that height)
+	sigs := blockEv.Block.LastCommit.Signatures
+	ourIndex := -1
+	for i, sig := range sigs {
+		// An absent vote carries no ValidatorAddress: CometBFT's NewCommitSigAbsent
+		// leaves it empty. Such an entry cannot be attributed to a validator by address,
+		// only by its position in the set, so it is handled after this loop for our own
+		// validator (the one whose index we can learn). Skipping it here is why a missed
+		// block previously produced no row at all and left the counter flat.
 		if len(sig.ValidatorAddress) == 0 {
 			continue
 		}
@@ -963,10 +1085,15 @@ func (p *Processor) insertBlockSigns(blockEv ctypes.EventDataNewBlock) {
 		// Convert to bech32 consensus address format
 		validatorAddr := sdk.ConsAddress(sig.ValidatorAddress).String()
 
-		// Log a warning if our validator missed signing while in the active set.
-		if validatorAddr == p.cfg.ValidatorConsensusAddress && signed == 0 {
-			p.missedBlocks.Inc()
-			p.logger.Warn("our validator missed signing block", "height", commitHeight, "validator", validatorAddr)
+		if validatorAddr == p.cfg.ValidatorConsensusAddress {
+			ourIndex = i
+			// Log a warning if our validator missed signing while in the active set.
+			// This covers a nil vote, which does carry an address; an absent vote does
+			// not and is counted after the loop.
+			if signed == 0 {
+				p.missedBlocks.WithLabelValues(p.cfg.ValidatorConsensusAddress, blockdb.SigTypeConsensus).Inc()
+				p.logger.Warn("our validator missed signing block", "height", commitHeight, "validator", validatorAddr)
+			}
 		}
 
 		p.blockSignMtx.Lock()
@@ -975,14 +1102,70 @@ func (p *Processor) insertBlockSigns(blockEv ctypes.EventDataNewBlock) {
 			blockTime:   blockTime,
 			validator:   validatorAddr,
 			signed:      signed,
+			sigType:     blockdb.SigTypeConsensus,
 		})
 		p.blockSignMtx.Unlock()
 	}
+
+	p.recordOurAbsence(commitHeight, blockTime, sigs, ourIndex)
 
 	// Blocks where our validator is out of the active set (jailed/unbonded) are
 	// intentionally NOT counted as missed: it is absent from the commit entirely,
 	// exactly like every other out-of-set validator. Counting only in-set absences
 	// keeps the missed-block calculation identical for all validators.
+}
+
+// recordOurAbsence records a signed=0 row for our validator when it appears in the
+// commit as an ABSENT vote, which carries no ValidatorAddress and so cannot be matched
+// by address in the loop above.
+//
+// Our position is learned from any block we did sign (ourIndex >= 0) and reused while
+// the commit size is unchanged. A different size means the validator set changed and the
+// remembered position may now belong to someone else, so it is discarded and relearned
+// from the next block we sign — at worst that under-counts briefly, which is the same
+// direction as the previous behaviour and never mis-attributes another validator.
+//
+// Only our own validator is handled: attributing every absent entry would require the
+// validator set for that height, which this processor does not fetch.
+func (p *Processor) recordOurAbsence(commitHeight int64, blockTime time.Time, sigs []ctypes.CommitSig, ourIndex int) {
+	if p.cfg.ValidatorConsensusAddress == "" {
+		return
+	}
+
+	// Seen by address this block: nothing to infer, just refresh what we know.
+	if ourIndex >= 0 {
+		p.ourSigIndex = ourIndex
+		p.ourSigSetSize = len(sigs)
+		return
+	}
+	if p.ourSigIndex < 0 || p.ourSigSetSize != len(sigs) {
+		p.ourSigIndex = -1
+		return
+	}
+	if p.ourSigIndex >= len(sigs) {
+		p.ourSigIndex = -1
+		return
+	}
+	// A non-empty address here means the slot belongs to a different validator, so the
+	// set was reordered without changing size; drop the stale index.
+	if len(sigs[p.ourSigIndex].ValidatorAddress) != 0 {
+		p.ourSigIndex = -1
+		return
+	}
+
+	p.missedBlocks.WithLabelValues(p.cfg.ValidatorConsensusAddress, blockdb.SigTypeConsensus).Inc()
+	p.logger.Warn("our validator was absent from the commit",
+		"height", commitHeight, "validator", p.cfg.ValidatorConsensusAddress, "index", p.ourSigIndex)
+
+	p.blockSignMtx.Lock()
+	p.blockSignBuffer = append(p.blockSignBuffer, bufferedBlockSign{
+		blockHeight: commitHeight,
+		blockTime:   blockTime,
+		validator:   p.cfg.ValidatorConsensusAddress,
+		signed:      0,
+		sigType:     blockdb.SigTypeConsensus,
+	})
+	p.blockSignMtx.Unlock()
 }
 
 func getAttribute(ev abci.Event, key string) string {

@@ -3,6 +3,7 @@ package web
 import (
 	"compress/gzip"
 	"context"
+	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/base64"
@@ -36,6 +37,7 @@ import (
 	"github.com/cosmos/cosmos-sdk/codec"
 	codectypes "github.com/cosmos/cosmos-sdk/codec/types"
 	stakingtypes "github.com/cosmos/cosmos-sdk/x/staking/types"
+	"github.com/cosmos/gogoproto/jsonpb"
 )
 
 const (
@@ -54,6 +56,8 @@ type Config struct {
 	PublicAPIURL       string        `yaml:"public_api_url"`       // Public API URL for browser clients
 	ExplorerURL        string        `yaml:"explorer_url"`         // Block explorer URL (e.g., "https://tellorscan.com")
 	WalletAddress      string        `yaml:"wallet_address"`       // Wallet address (tellor1xxx)
+	DelegateReporter   string        `yaml:"delegate_reporter"`    // Override one-click delegation reporter (default: WalletAddress)
+	DelegateValidator  string        `yaml:"delegate_validator"`   // Override one-click delegation validator (default: operator of WalletAddress)
 	LookbackPeriodDays int           `yaml:"lookback_period_days"` // Days to look back for statistics (default 7)
 	StatsPeriodDays    int           `yaml:"stats_period_days"`    // Days to display in Network Statistics section (default 30)
 
@@ -68,6 +72,9 @@ type Config struct {
 }
 
 type Server struct {
+	assetVerOnce sync.Once
+	assetVer     string
+
 	cfg        Config
 	logger     log.Logger
 	db         blockdb.Db
@@ -75,10 +82,11 @@ type Server struct {
 	cdc        *codec.ProtoCodec
 
 	// Cache for validator tree (refreshed every hour or on demand)
-	cacheMu         sync.RWMutex
-	cachedTree      []ValidatorTree
-	cacheTimestamp  time.Time
-	cacheRefreshing bool
+	cacheMu           sync.RWMutex
+	cachedTree        []ValidatorTree
+	cacheTimestamp    time.Time
+	cacheRefreshing   bool
+	cachedRewardStats map[int]NetworkRewardStats // per-period network reward stats, refreshed with the tree
 
 	// ctx is the server's root context, stored for background operations (e.g. cache refresh).
 	ctx context.Context
@@ -346,11 +354,15 @@ func (s *Server) routes() http.Handler {
 
 // handleAssets serves static files (CSS, JS, images) with aggressive caching and gzip compression.
 func (s *Server) handleAssets(w http.ResponseWriter, r *http.Request) {
-	// Asset URLs are unversioned (e.g. /assets/script.js), so we cannot use
-	// `immutable` — that would pin the old content in browsers across deploys.
-	// `no-cache` forces revalidation on every request, which is cheap because
-	// the ETag below returns 304 when the file is unchanged.
-	w.Header().Set("Cache-Control", "no-cache, must-revalidate")
+	// Asset URLs are versioned by the template (/assets/script.js?v=<hash>), so a pinned
+	// request can be cached hard: its content cannot change without the URL changing.
+	// Unversioned requests - a direct hit, or an old cached page - still revalidate, which
+	// is cheap because the ETag below returns 304 when the file is unchanged.
+	if r.URL.Query().Get("v") != "" {
+		w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+	} else {
+		w.Header().Set("Cache-Control", "no-cache, must-revalidate")
+	}
 	w.Header().Set("Vary", "Accept-Encoding")
 
 	fs := http.FileServer(http.Dir(assetsDir))
@@ -392,7 +404,34 @@ func (w *gzipResponseWriter) Write(b []byte) (int, error) {
 	return w.Writer.Write(b)
 }
 
+// assetVersion returns a short content hash over the served assets, used to version their
+// URLs (/assets/script.js?v=<hash>). It changes exactly when an asset changes, so a deploy
+// invalidates browser caches while unchanged assets stay cached. Memoised; if an asset
+// cannot be read it falls back to the process start time, which is still unique per deploy.
+func (s *Server) assetVersion() string {
+	s.assetVerOnce.Do(func() {
+		h := sha256.New()
+		for _, n := range []string{"style.css", "script.js"} {
+			b, err := os.ReadFile(filepath.Join(assetsDir, n))
+			if err != nil {
+				s.assetVer = strconv.FormatInt(time.Now().Unix(), 10)
+				return
+			}
+			h.Write(b)
+		}
+		s.assetVer = hex.EncodeToString(h.Sum(nil))[:12]
+	})
+	return s.assetVer
+}
+
 func (s *Server) handleRoot(w http.ResponseWriter, r *http.Request) {
+	// The HTML carries the versioned asset URLs, so it must be revalidated rather than
+	// served from cache - otherwise an old page keeps requesting old asset versions.
+	// Browsers given no header at all apply heuristic caching and held this page for days.
+	// The page is cheap to regenerate; the assets it points at are the expensive part and
+	// those are cached hard, busted by their ?v= hash.
+	w.Header().Set("Cache-Control", "no-cache, must-revalidate")
+
 	ctx := r.Context()
 
 	// Non-blocking: get whatever is in cache, don't wait for building
@@ -416,12 +455,29 @@ func (s *Server) handleRoot(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Get network reward statistics for the stats display period
-	rewardStats := s.queryNetworkRewardStats(ctx, periodDays)
+	// Get network reward statistics for the stats display period (served from cache; the
+	// background refresh pre-computes all periods so this doesn't scan rewards per request).
+	s.cacheMu.RLock()
+	rewardStats, statsCached := s.cachedRewardStats[periodDays]
+	s.cacheMu.RUnlock()
+	if !statsCached {
+		rewardStats = s.queryNetworkRewardStats(ctx, periodDays)
+	}
 
 	// Derive addresses and moniker from wallet
 	ourReporterAddr := s.cfg.WalletAddress
 	ourValidatorAddr := cryptoaddr.ToValidatorOperator(s.cfg.WalletAddress)
+
+	// One-click delegation target. Defaults to the operator's own reporter/validator; the
+	// env overrides let the flow be tested against a low-min reporter with a small stake.
+	delegateReporterAddr := ourReporterAddr
+	if s.cfg.DelegateReporter != "" {
+		delegateReporterAddr = s.cfg.DelegateReporter
+	}
+	delegateValidatorAddr := ourValidatorAddr
+	if s.cfg.DelegateValidator != "" {
+		delegateValidatorAddr = s.cfg.DelegateValidator
+	}
 	ourMoniker := ""
 	if reporter, ok := reporters[s.cfg.WalletAddress]; ok && reporter != nil && reporter.Metadata != nil {
 		ourMoniker = reporter.Metadata.Moniker
@@ -449,6 +505,7 @@ func (s *Server) handleRoot(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := tpl.Execute(w, map[string]any{
+		"AssetVersion":      s.assetVersion(),
 		"ValidatorTree":     validatorTree,
 		"TreeCacheTime":     cacheTimeStr,
 		"TreeLoading":       isLoading,
@@ -461,8 +518,8 @@ func (s *Server) handleRoot(w http.ResponseWriter, r *http.Request) {
 		"TotalValidating":   rewardStats.TotalValidating,
 		"OurValidating":     rewardStats.OurValidating,
 		"OurMoniker":        ourMoniker,
-		"OurReporterAddr":   ourReporterAddr,
-		"OurValidatorAddr":  ourValidatorAddr,
+		"OurReporterAddr":   delegateReporterAddr,
+		"OurValidatorAddr":  delegateValidatorAddr,
 		"OperatorStartYear": OperatorStartYear,
 		"ExperienceYears":   experienceYears,
 		"LayerAPIURL":       s.cfg.PublicAPIURL,
@@ -637,65 +694,38 @@ type NetworkRewardStats struct {
 
 // queryNetworkRewardStats aggregates reporting and validating rewards for the stats display period.
 func (s *Server) queryNetworkRewardStats(ctx context.Context, periodDays int) NetworkRewardStats {
-	queryTotal := func(rewardType string) uint64 {
-		q := fmt.Sprintf(`
-			SELECT coalesce(sum(toFloat64(%s)), 0) AS total
-			FROM %s
-			WHERE %s = ?
-			  AND %s >= now() - INTERVAL %d DAY
-		`, blockdb.ColAmount, blockdb.TableNameRewards,
-			blockdb.ColType,
-			blockdb.ColBlockTime, periodDays)
-
-		rows, err := s.db.Query(ctx, q, rewardType)
-		if err != nil {
-			s.logger.Error("failed to query total rewards", "reward_type", rewardType, "error", err)
-			return 0
-		}
-		defer func() { _ = rows.Close() }()
-		var total float64
-		if rows.Next() {
-			_ = rows.Scan(&total)
-		}
-		return uint64(total)
-	}
-
-	queryOurs := func(rewardType, addr string) uint64 {
-		if addr == "" {
-			return 0
-		}
-		q := fmt.Sprintf(`
-			SELECT coalesce(sum(toFloat64(%s)), 0) AS total
-			FROM %s
-			WHERE %s = ?
-			  AND %s = ?
-			  AND %s >= now() - INTERVAL %d DAY
-		`, blockdb.ColAmount, blockdb.TableNameRewards,
-			blockdb.ColRecipient,
-			blockdb.ColType,
-			blockdb.ColBlockTime, periodDays)
-
-		rows, err := s.db.Query(ctx, q, addr, rewardType)
-		if err != nil {
-			s.logger.Error("failed to query our rewards", "reward_type", rewardType, "error", err)
-			return 0
-		}
-		defer func() { _ = rows.Close() }()
-		var total float64
-		if rows.Next() {
-			_ = rows.Scan(&total)
-		}
-		return uint64(total)
-	}
-
 	ourReporterAddr := s.cfg.WalletAddress
 	ourValidatorAddr := cryptoaddr.ToValidatorOperator(s.cfg.WalletAddress)
 
+	// One scan over the period computes all four sums via conditional aggregation, instead of
+	// four separate full-table scans of the rewards table.
+	q := fmt.Sprintf(`
+		SELECT
+			coalesce(sumIf(toFloat64(%[1]s), %[3]s = '%[5]s'), 0),
+			coalesce(sumIf(toFloat64(%[1]s), %[3]s = '%[5]s' AND %[4]s = ?), 0),
+			coalesce(sumIf(toFloat64(%[1]s), %[3]s = '%[6]s'), 0),
+			coalesce(sumIf(toFloat64(%[1]s), %[3]s = '%[6]s' AND %[4]s = ?), 0)
+		FROM %[2]s
+		WHERE %[7]s >= now() - INTERVAL %[8]d DAY
+	`, blockdb.ColAmount, blockdb.TableNameRewards, blockdb.ColType, blockdb.ColRecipient,
+		blockdb.RewardTypeReporterTip, blockdb.RewardTypeValidatorDelegator,
+		blockdb.ColBlockTime, periodDays)
+
+	rows, err := s.db.Query(ctx, q, ourReporterAddr, ourValidatorAddr)
+	if err != nil {
+		s.logger.Error("failed to query network reward stats", "error", err)
+		return NetworkRewardStats{}
+	}
+	defer func() { _ = rows.Close() }()
+	var totalReporting, ourReporting, totalValidating, ourValidating float64
+	if rows.Next() {
+		_ = rows.Scan(&totalReporting, &ourReporting, &totalValidating, &ourValidating)
+	}
 	return NetworkRewardStats{
-		TotalReporting:  formatLoya(queryTotal(blockdb.RewardTypeReporterTip)),
-		OurReporting:    formatLoya(queryOurs(blockdb.RewardTypeReporterTip, ourReporterAddr)),
-		TotalValidating: formatLoya(queryTotal(blockdb.RewardTypeValidatorDelegator)),
-		OurValidating:   formatLoya(queryOurs(blockdb.RewardTypeValidatorDelegator, ourValidatorAddr)),
+		TotalReporting:  formatLoya(uint64(totalReporting)),
+		OurReporting:    formatLoya(uint64(ourReporting)),
+		TotalValidating: formatLoya(uint64(totalValidating)),
+		OurValidating:   formatLoya(uint64(ourValidating)),
 	}
 }
 
@@ -953,6 +983,19 @@ type ValidatorTree struct {
 	// Nested reporters under this validator
 	Reporters    []ReporterTree
 	HasReporters bool
+	// Delegators lists every staking delegator to this validator, regardless of which
+	// reporter (if any) they selected. Populated only for our validator, so a stake
+	// delegated to us still shows even when the selector picked a different reporter.
+	Delegators    []DelegatorTree
+	HasDelegators bool
+}
+
+// DelegatorTree is a raw staking delegator to a validator, independent of reporter
+// selection. Reporter is the reporter that delegator selected, or "" (none).
+type DelegatorTree struct {
+	ShortAddress string
+	Stake        string
+	Reporter     string
 }
 
 // ReporterTree represents a reporter under a validator for display.
@@ -1000,6 +1043,16 @@ type CachedValidatorTree struct {
 	Jailed          bool                 `json:"jailed"`
 	Reporters       []CachedReporterTree `json:"reporters"`
 	HasReporters    bool                 `json:"has_reporters"`
+	Delegators      []CachedDelegator    `json:"delegators,omitempty"`
+	HasDelegators   bool                 `json:"has_delegators,omitempty"`
+}
+
+// CachedDelegator is a JSON-serializable staking delegator to a validator, independent of
+// reporter selection.
+type CachedDelegator struct {
+	ShortAddress string `json:"short_address"`
+	Stake        string `json:"stake"`
+	Reporter     string `json:"reporter"`
 }
 
 // CachedReporterTree is a JSON-serializable version of ReporterTree.
@@ -1064,6 +1117,11 @@ func (s *Server) buildValidatorTree(ctx context.Context) []ValidatorTree {
 	}
 	s.logger.Info("buildValidatorTree: reporters fetched", "count", len(reporterMap))
 
+	// Pre-fetch every reporter's selections ONCE, concurrently. Previously
+	// fetchSelectionsForReporter ran sequentially and twice per reporter, which
+	// dominated page build time (~20s for ~57 reporters).
+	selectionsByReporter := s.fetchAllSelectionsConcurrent(ctx, reporterMap)
+
 	// Build a map of validator operator address -> validator index
 	validatorIndex := make(map[string]int)
 	for i := range validators {
@@ -1092,7 +1150,7 @@ func (s *Server) buildValidatorTree(ctx context.Context) []ValidatorTree {
 
 		// Get all validators the reporter has staked to (from all their selections)
 		stakedValidators := make(map[int]bool)
-		selections := s.fetchSelectionsForReporter(ctx, reporterAddr)
+		selections := selectionsByReporter[reporterAddr]
 		for _, sel := range selections {
 			if len(sel.IndividualDelegations) > 0 {
 				for _, del := range sel.IndividualDelegations {
@@ -1112,8 +1170,18 @@ func (s *Server) buildValidatorTree(ctx context.Context) []ValidatorTree {
 
 		matched := false
 
+		// Priority 0: reporter operates a validator under the same account.
+		// The reporter (tellor1…) and validator operator (tellorvaloper1…) share the
+		// same underlying bytes, so this is the most reliable link and is moniker-independent.
+		if valIdx, ok := validatorIndex[cryptoaddr.ToValidatorOperator(reporterAddr)]; ok {
+			reporterToValidator[reporterAddr] = valIdx
+			s.logger.Debug("reporter matched by operator address",
+				"reporter", reporterAddr, "validator", validators[valIdx].Moniker)
+			matched = true
+		}
+
 		// Priority 1: Match by moniker
-		if reporterMoniker != "" {
+		if !matched && reporterMoniker != "" {
 			if matchingValidators, ok := validatorsByMoniker[reporterMoniker]; ok && len(matchingValidators) > 0 {
 				// If multiple validators with same moniker, prefer one the reporter staked to
 				for _, valIdx := range matchingValidators {
@@ -1180,7 +1248,7 @@ func (s *Server) buildValidatorTree(ctx context.Context) []ValidatorTree {
 		reporterNode := s.findOrCreateReporterTree(homeValidator, reporter)
 
 		// Fetch all selectors for this reporter
-		selections := s.fetchSelectionsForReporter(ctx, reporterAddr)
+		selections := selectionsByReporter[reporterAddr]
 		for _, sel := range selections {
 			// Calculate total stake for this selector across all validators
 			var totalStake uint64
@@ -1216,6 +1284,30 @@ func (s *Server) buildValidatorTree(ctx context.Context) []ValidatorTree {
 		// Set validator jailed status from SDK data
 		if validators[i].Validator != nil {
 			validators[i].Jailed = validators[i].Validator.Jailed
+		}
+
+		// For our validator, list its direct Delegations: delegators to the validator that
+		// did NOT select our reporter. Those that did appear under our reporter's own
+		// Delegations, so listing them here too would duplicate. This surfaces stake
+		// delegated to us that selected a different reporter (or none), e.g. a test wallet.
+		if validators[i].Validator != nil && validators[i].Validator.OperatorAddress == ourValidatorAddr {
+			for _, d := range s.fetchValidatorDelegators(ctx, ourValidatorAddr) {
+				addr := d.Delegation.DelegatorAddress
+				rep := s.fetchSelectorReporter(ctx, addr)
+				if rep == ourReporterAddr {
+					continue
+				}
+				repLabel := "none"
+				if rep != "" {
+					repLabel = truncateAddress(rep)
+				}
+				validators[i].Delegators = append(validators[i].Delegators, DelegatorTree{
+					ShortAddress: truncateAddress(addr),
+					Stake:        formatLoya(d.Balance.Amount.Uint64()),
+					Reporter:     repLabel,
+				})
+			}
+			validators[i].HasDelegators = len(validators[i].Delegators) > 0
 		}
 
 		// Populate missed blocks for validator from Prometheus metrics
@@ -1600,6 +1692,30 @@ func (s *Server) fetchReporters(ctx context.Context) map[string]*reportertypes.R
 	return reporters
 }
 
+// fetchAllSelectionsConcurrent fetches selections for every reporter in parallel
+// (bounded worker pool) and returns them keyed by reporter address. This replaces
+// the previous sequential, twice-per-reporter fetching that dominated build time.
+func (s *Server) fetchAllSelectionsConcurrent(ctx context.Context, reporterMap map[string]*reportertypes.Reporter) map[string][]*reportertypes.FormattedSelection {
+	result := make(map[string][]*reportertypes.FormattedSelection, len(reporterMap))
+	var mu sync.Mutex
+	var wg sync.WaitGroup
+	sem := make(chan struct{}, 16) // cap concurrent chain queries
+	for reporterAddr := range reporterMap {
+		wg.Add(1)
+		go func(addr string) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			sels := s.fetchSelectionsForReporter(ctx, addr)
+			mu.Lock()
+			result[addr] = sels
+			mu.Unlock()
+		}(reporterAddr)
+	}
+	wg.Wait()
+	return result
+}
+
 // fetchSelectionsForReporter fetches all selectors for a reporter.
 // Returns FormattedSelection from the reporter module directly.
 func (s *Server) fetchSelectionsForReporter(ctx context.Context, reporterAddr string) []*reportertypes.FormattedSelection {
@@ -1629,7 +1745,7 @@ func (s *Server) fetchSelectionsForReporter(ctx context.Context, reporterAddr st
 		}
 
 		var result reportertypes.QuerySelectionsToResponse
-		if err := s.cdc.UnmarshalJSON(body, &result); err != nil {
+		if err := unmarshalSelectionsJSON(body, &result); err != nil {
 			s.logger.Debug("selections decode error", "reporter", reporterAddr, "error", err)
 			continue
 		}
@@ -1642,6 +1758,13 @@ func (s *Server) fetchSelectionsForReporter(ctx context.Context, reporterAddr st
 	}
 
 	return selections
+}
+
+// unmarshalSelectionsJSON tolerates response fields added by newer Layer versions.
+// The monitor only reads concrete reporter types here, so no interface unpacking is needed.
+func unmarshalSelectionsJSON(body []byte, result *reportertypes.QuerySelectionsToResponse) error {
+	unmarshaler := jsonpb.Unmarshaler{AllowUnknownFields: true}
+	return unmarshaler.Unmarshal(strings.NewReader(string(body)), result)
 }
 
 // fetchDelegationsForSelector fetches all delegations for a selector.
@@ -1691,6 +1814,68 @@ func (s *Server) fetchDelegationsForSelector(ctx context.Context, selectorAddr s
 	return delegations
 }
 
+// fetchValidatorDelegators returns every staking delegator to a validator (loya balances),
+// using the same failover-over-LayerAPIURLs pattern as the other staking queries.
+func (s *Server) fetchValidatorDelegators(ctx context.Context, valoper string) []stakingtypes.DelegationResponse {
+	var out []stakingtypes.DelegationResponse
+	for _, baseURL := range s.cfg.LayerAPIURLs {
+		url := fmt.Sprintf("%s/cosmos/staking/v1beta1/validators/%s/delegations?pagination.limit=1000", baseURL, valoper)
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+		if err != nil {
+			continue
+		}
+		resp, err := s.httpClient.Do(req)
+		if err != nil {
+			continue
+		}
+		body, readErr := io.ReadAll(resp.Body)
+		_ = resp.Body.Close()
+		if readErr != nil || resp.StatusCode != http.StatusOK {
+			continue
+		}
+		var result stakingtypes.QueryValidatorDelegationsResponse
+		if err := s.cdc.UnmarshalJSON(body, &result); err != nil {
+			continue
+		}
+		for _, d := range result.DelegationResponses {
+			if d.Balance.Denom == "loya" {
+				out = append(out, d)
+			}
+		}
+		if len(out) > 0 {
+			return out
+		}
+	}
+	return out
+}
+
+// fetchSelectorReporter returns the reporter a selector has selected, or "" if none.
+func (s *Server) fetchSelectorReporter(ctx context.Context, selector string) string {
+	for _, baseURL := range s.cfg.LayerAPIURLs {
+		url := fmt.Sprintf("%s/tellor-io/layer/reporter/selector-reporter/%s", baseURL, selector)
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+		if err != nil {
+			continue
+		}
+		resp, err := s.httpClient.Do(req)
+		if err != nil {
+			continue
+		}
+		body, readErr := io.ReadAll(resp.Body)
+		_ = resp.Body.Close()
+		if readErr != nil || resp.StatusCode != http.StatusOK {
+			continue
+		}
+		var out struct {
+			Reporter string `json:"reporter"`
+		}
+		if err := json.Unmarshal(body, &out); err == nil && out.Reporter != "" {
+			return out.Reporter
+		}
+	}
+	return ""
+}
+
 // refreshTreeCache rebuilds the validator tree cache in-memory.
 func (s *Server) refreshTreeCache(ctx context.Context) ([]ValidatorTree, time.Time) {
 	s.cacheMu.Lock()
@@ -1708,6 +1893,13 @@ func (s *Server) refreshTreeCache(ctx context.Context) ([]ValidatorTree, time.Ti
 	// Build the tree (this can take a while)
 	startTime := time.Now()
 	tree := s.buildValidatorTree(ctx)
+
+	// Pre-compute the network reward stats for each selectable period so page loads serve
+	// them from cache instead of running the (uncached, unindexed) rewards scans per request.
+	rewardStats := make(map[int]NetworkRewardStats, 3)
+	for _, p := range []int{1, 7, 30} {
+		rewardStats[p] = s.queryNetworkRewardStats(ctx, p)
+	}
 	duration := time.Since(startTime)
 
 	s.logger.Info("validator tree cache refreshed", "duration", duration, "validators", len(tree))
@@ -1715,6 +1907,7 @@ func (s *Server) refreshTreeCache(ctx context.Context) ([]ValidatorTree, time.Ti
 	// Update in-memory cache
 	s.cacheMu.Lock()
 	s.cachedTree = tree
+	s.cachedRewardStats = rewardStats
 	s.cacheTimestamp = time.Now()
 	s.cacheRefreshing = false
 	timestamp := s.cacheTimestamp
@@ -1844,8 +2037,9 @@ func (s *Server) getMissedBlocksPerValidatorFromDB(ctx context.Context, periodDa
 	totalQuery := fmt.Sprintf(`
 		SELECT COUNT(DISTINCT %s)
 		FROM %s
-		WHERE %s >= now() - INTERVAL %d DAY
-	`, blockdb.ColBlockHeight, blockdb.TableNameBlockSigns, blockdb.ColBlockTimestamp, periodDays)
+		WHERE %s >= now() - INTERVAL %d DAY AND %s = '%s'
+	`, blockdb.ColBlockHeight, blockdb.TableNameBlockSigns, blockdb.ColBlockTimestamp, periodDays,
+		blockdb.ColSigType, blockdb.SigTypeConsensus)
 	var totalBlocks int64
 	if trows, err := s.db.Query(ctx, totalQuery); err == nil {
 		if trows.Next() {
@@ -1866,13 +2060,14 @@ func (s *Server) getMissedBlocksPerValidatorFromDB(ctx context.Context, periodDa
 			%s,
 			COUNT(DISTINCT %s) AS signed_blocks
 		FROM %s
-		WHERE %s >= now() - INTERVAL %d DAY AND %s = 1
+		WHERE %s >= now() - INTERVAL %d DAY AND %s = 1 AND %s = '%s'
 		GROUP BY %s
 	`,
 		blockdb.ColValidatorAddress,
 		blockdb.ColBlockHeight,
 		blockdb.TableNameBlockSigns,
 		blockdb.ColBlockTimestamp, periodDays, blockdb.ColSigned,
+		blockdb.ColSigType, blockdb.SigTypeConsensus,
 		blockdb.ColValidatorAddress,
 	)
 
@@ -1915,7 +2110,11 @@ func toCachedTree(tree []ValidatorTree) []CachedValidatorTree {
 			Status:          v.Status,
 			Jailed:          v.Jailed,
 			HasReporters:    v.HasReporters,
+			HasDelegators:   v.HasDelegators,
 			Reporters:       make([]CachedReporterTree, len(v.Reporters)),
+		}
+		for _, d := range v.Delegators {
+			cached[i].Delegators = append(cached[i].Delegators, CachedDelegator(d))
 		}
 		if v.Validator != nil {
 			cached[i].OperatorAddress = v.Validator.OperatorAddress

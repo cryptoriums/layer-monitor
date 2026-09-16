@@ -36,10 +36,20 @@ type BlockFetcher interface {
 
 const ComponentName = "monitor"
 
-// rpcTimeout caps how long a single RPC call to one node may take.
-// This prevents the monitor from stalling when a fallback node has dropped packets
-// (firewall, etc.) that cause TCP connections to hang for minutes.
-const rpcTimeout = 5 * time.Second
+const (
+	// rpcTimeout caps how long a single RPC call to one node may take.
+	// This prevents the monitor from stalling when a fallback node has dropped packets
+	// (firewall, etc.) that cause TCP connections to hang for minutes.
+	rpcTimeout = 5 * time.Second
+
+	// Buffer live blocks before writing them to ClickHouse. Flushing every poll
+	// creates several tiny MergeTree parts per block and eventually turns background
+	// merges into sustained disk pressure. These defaults keep dashboard data fresh
+	// while reducing the steady-state INSERT rate by roughly an order of magnitude.
+	defaultFlushInterval = 30 * time.Second
+	defaultFlushBlocks   = 100
+	shutdownFlushTimeout = 10 * time.Second
+)
 
 // Config controls the RPC-based monitor behavior.
 type Config struct {
@@ -48,6 +58,8 @@ type Config struct {
 	BackfillLookback          int           `yaml:"backfill_lookback"` // Days to look back for backfilling (0 = disabled)
 	PollInterval              time.Duration `yaml:"poll_interval"`
 	FetchWorkers              int           `yaml:"fetch_workers"`               // Number of parallel block fetchers (default 10)
+	FlushInterval             time.Duration `yaml:"flush_interval"`              // Maximum age of buffered blocks (default 30s)
+	FlushBlocks               int           `yaml:"flush_blocks"`                // Maximum buffered blocks before a flush (default 100)
 	WalletAddress             string        `yaml:"wallet_address"`              // Our wallet address (tellor1xxx) for "our" metric labels
 	ValidatorConsensusAddress string        `yaml:"validator_consensus_address"` // Our validator consensus address (tellorvalcons) for "our" metric labels
 	Registerer                prometheus.Registerer
@@ -60,6 +72,9 @@ type Monitor struct {
 	fetcher   BlockFetcher
 	db        db.Db
 	processor processor.BlockProcessor
+
+	unflushedBlocks int
+	lastFlush       time.Time
 }
 
 // rpcFetcher implements BlockFetcher using multiple RPC clients with failover.
@@ -104,6 +119,12 @@ func NewWithFetcher(ctx context.Context, logger log.Logger, cfg Config, db db.Db
 	if cfg.FetchWorkers <= 0 {
 		cfg.FetchWorkers = 10
 	}
+	if cfg.FlushInterval <= 0 {
+		cfg.FlushInterval = defaultFlushInterval
+	}
+	if cfg.FlushBlocks <= 0 {
+		cfg.FlushBlocks = defaultFlushBlocks
+	}
 
 	procCfg := processor.ProcessorConfig{
 		WalletAddress:             cfg.WalletAddress,
@@ -118,6 +139,7 @@ func NewWithFetcher(ctx context.Context, logger log.Logger, cfg Config, db db.Db
 		fetcher:   fetcher,
 		db:        db,
 		processor: processor.NewWithConfig(ctx, logger, db, procCfg),
+		lastFlush: time.Now(),
 	}, nil
 }
 
@@ -129,6 +151,7 @@ func (m *Monitor) Run(ctx context.Context) error {
 	}
 
 	m.logger.Debug("starting", "height", nextHeight)
+	defer m.flushOnShutdown()
 
 	ticker := time.NewTicker(m.cfg.PollInterval)
 	defer ticker.Stop()
@@ -140,6 +163,9 @@ func (m *Monitor) Run(ctx context.Context) error {
 		}
 		if lastProcessed >= nextHeight {
 			nextHeight = lastProcessed + 1
+		}
+		if flushErr := m.flushIfDue(ctx); flushErr != nil {
+			m.logger.Error("flush failed", "error", flushErr)
 		}
 		// No progress and an error: the nodes may have pruned past our cursor
 		// (every block from nextHeight up is gone). Re-check the earliest available
@@ -193,12 +219,14 @@ func (m *Monitor) catchUp(ctx context.Context, nextHeight int64) (lastProcessed 
 				return h - 1, fmt.Errorf("missing block %d from parallel fetch", h)
 			}
 			m.processor.ProcessBlock(ctx, event)
+			m.unflushedBlocks++
 			lastProcessed = h
 		}
 
-		// Flush buffered records after each batch for consistent writes
-		if err := m.processor.Flush(ctx); err != nil {
-			m.logger.Error("flush failed", "error", err)
+		// During a large backfill, do not wait until catchUp returns before
+		// enforcing the block limit.
+		if flushErr := m.flushIfDue(ctx); flushErr != nil {
+			m.logger.Error("flush failed", "error", flushErr)
 		}
 
 		// Log progress for long backfills
@@ -212,6 +240,41 @@ func (m *Monitor) catchUp(ctx context.Context, nextHeight int64) (lastProcessed 
 		}
 	}
 	return lastProcessed, nil
+}
+
+func (m *Monitor) flushIfDue(ctx context.Context) error {
+	if m.unflushedBlocks == 0 {
+		return nil
+	}
+	if m.unflushedBlocks < m.cfg.FlushBlocks && time.Since(m.lastFlush) < m.cfg.FlushInterval {
+		return nil
+	}
+	return m.flush(ctx)
+}
+
+func (m *Monitor) flush(ctx context.Context) error {
+	if m.unflushedBlocks == 0 {
+		return nil
+	}
+	if err := m.processor.Flush(ctx); err != nil {
+		// Preserve the count so the next poll retries any buffers that remain.
+		return err
+	}
+	m.logger.Debug("flushed block batch", "blocks", m.unflushedBlocks)
+	m.unflushedBlocks = 0
+	m.lastFlush = time.Now()
+	return nil
+}
+
+func (m *Monitor) flushOnShutdown() {
+	if m.unflushedBlocks == 0 {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), shutdownFlushTimeout)
+	defer cancel()
+	if err := m.flush(ctx); err != nil {
+		m.logger.Error("final flush failed", "blocks", m.unflushedBlocks, "error", err)
+	}
 }
 
 // fetchBlocksParallel fetches a range of blocks concurrently.
