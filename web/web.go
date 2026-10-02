@@ -561,12 +561,26 @@ func (s *Server) getValidatorTreeNonBlocking() ([]ValidatorTree, time.Time, bool
 	return tree, timestamp, refreshing
 }
 
+// displayPeriodDays is the period the UI shows when no ?period is given. The page
+// marks the StatsPeriodDays button active, so the validator tree must use the same
+// value or the cards disagree with the Network Statistics directly above them.
+//
+// LookbackPeriodDays is deliberately not used here: it is wired to the backfill
+// window (how far back to ingest on startup), which says nothing about what the
+// operator wants displayed.
+func (s *Server) displayPeriodDays() int {
+	if s.cfg.StatsPeriodDays > 0 {
+		return s.cfg.StatsPeriodDays
+	}
+	return DefaultStatsPeriodDays
+}
+
 // handleGetTree returns the validator tree as JSON for AJAX loading.
 func (s *Server) handleGetTree(w http.ResponseWriter, r *http.Request) {
 	tree, timestamp, isLoading := s.getValidatorTreeNonBlocking()
 
-	// Parse optional period param; default to LookbackPeriodDays
-	periodDays := s.cfg.LookbackPeriodDays
+	// Parse optional period param; default to the period the page shows as active.
+	periodDays := s.displayPeriodDays()
 	if p := r.URL.Query().Get("period"); p != "" {
 		if n, err := strconv.Atoi(p); err == nil && (n == 1 || n == 7 || n == 30) {
 			periodDays = n
@@ -576,8 +590,8 @@ func (s *Server) handleGetTree(w http.ResponseWriter, r *http.Request) {
 	// Convert to cached (serialisable) tree
 	validators := toCachedTree(tree)
 
-	// If a non-default period was requested, overlay fresh rewards + missed metrics
-	if periodDays != s.cfg.LookbackPeriodDays && len(validators) > 0 {
+	// The cached tree is built for displayPeriodDays; any other period needs an overlay.
+	if periodDays != s.displayPeriodDays() && len(validators) > 0 {
 		s.populateCachedRewardsForPeriod(r.Context(), validators, periodDays)
 		s.populateCachedMissedCyclesForPeriod(r.Context(), validators, periodDays)
 		s.populateCachedMissedBlocksForPeriod(r.Context(), validators, periodDays)
@@ -1273,9 +1287,9 @@ func (s *Server) buildValidatorTree(ctx context.Context) []ValidatorTree {
 		}
 	}
 
-	// Get missed cycles per reporter and missed blocks per validator from DB (lookback period)
+	// Get missed cycles per reporter and missed blocks per validator from DB (display period)
 	missedCyclesMap, totalCycles := s.getMissedCyclesPerReporterFromDB(ctx)
-	missedBlocksMap, totalBlocks := s.getMissedBlocksPerValidatorFromDB(ctx, s.cfg.LookbackPeriodDays)
+	missedBlocksMap, totalBlocks := s.getMissedBlocksPerValidatorFromDB(ctx, s.displayPeriodDays())
 
 	// Calculate total stake per reporter, detect self-selectors, set HasReporters flag, and populate metrics
 	for i := range validators {
@@ -1434,7 +1448,7 @@ func (s *Server) buildValidatorTree(ctx context.Context) []ValidatorTree {
 
 // populateRewardsData fetches and populates rewards for all validators and reporters in the tree.
 func (s *Server) populateRewardsData(ctx context.Context, validators []ValidatorTree) {
-	s.populateRewardsDataForPeriod(ctx, validators, s.cfg.LookbackPeriodDays)
+	s.populateRewardsDataForPeriod(ctx, validators, s.displayPeriodDays())
 }
 
 // populateRewardsDataForPeriod fetches and populates rewards using a specific period.
@@ -1935,7 +1949,7 @@ func (s *Server) handleRefreshTree(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) getMissedCyclesPerReporterFromDB(ctx context.Context) (map[string]int64, int64) {
-	return s.getMissedCyclesPerReporterFromDBForPeriod(ctx, s.cfg.LookbackPeriodDays)
+	return s.getMissedCyclesPerReporterFromDBForPeriod(ctx, s.displayPeriodDays())
 }
 
 // getMissedCyclesPerReporterFromDBForPeriod queries missed reports from DB for all
