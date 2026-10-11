@@ -158,8 +158,6 @@ type Processor struct {
 	// Cumulative amount tracking for reward increment calculation.
 	// Maps reporter address -> last known cumulative amount.
 	rewardCumulative sync.Map
-	// Maps "validator:allocType" -> last known cumulative amount.
-	validatorRewardCumulative sync.Map
 
 	// Batch insert buffer for all reward types (unified rewards table).
 	rewardBuffer []bufferedReward
@@ -660,66 +658,23 @@ func (p *Processor) insertValidatorReward(ctx context.Context, height int64, blo
 		return fmt.Errorf("validator reward event missing amount (type=%s validator=%s)", rewardType, validator)
 	}
 
-	// Parse current cumulative amount from chain event using full decimal precision
-	currentAmount, err := parseDecimalAmountPrecise(amountStr)
+	// The chain emits `rewards` and `commission` in BeginBlock as the amount
+	// allocated in THAT block, not a running total. Consecutive blocks give
+	// 90.3, 161.2, 170.4, 79.8, 91.2 loya - values that rise and fall, so they
+	// are not a counter. Summing them across a withdrawal interval reproduces the
+	// payout: 104.67 loya average x 17000 blocks = 1.779 TRB, against an observed
+	// 1.785 TRB withdrawal.
+	//
+	// Subtracting the previous block's value under-reported validator earnings by
+	// roughly 40%: it stored a delta on every block where the allocation rose, and
+	// only the true figure where it fell (negative delta, raw value used).
+	amount, err := parseDecimalAmountPrecise(amountStr)
 	if err != nil {
 		return fmt.Errorf("parse validator reward amount: %w", err)
 	}
 
-	// Tiny threshold (< 0.0001 loya) to skip only near-zero amounts after withdrawal
-	tinyThreshold := decimal.NewFromFloat(0.0001)
-
-	// Get previous cumulative amount from in-memory cache
-	cacheKey := validator + ":" + rewardType
-	prev, hasPrev := p.validatorRewardCumulative.Load(cacheKey)
-
-	// If no previous value, just populate cache and skip insert (first event for this validator)
-	if !hasPrev {
-		p.validatorRewardCumulative.Store(cacheKey, currentAmount)
-		p.logger.Debug("first validator reward event, populating cache baseline",
-			"validator", validator,
-			"type", rewardType,
-			"baseline", currentAmount.String(),
-		)
-		return nil
-	}
-
-	prevAmount := prev.(decimal.Decimal)
-
-	// Calculate increment
-	increment := currentAmount.Sub(prevAmount)
-
-	// Handle withdrawal detection (negative increment means cumulative was reset)
-	if increment.LessThanOrEqual(decimal.Zero) {
-		// Check if this is a near-zero cumulative (true withdrawal drain)
-		if currentAmount.LessThan(tinyThreshold) {
-			// True withdrawal with near-zero cumulative - no meaningful reward to insert
-			p.validatorRewardCumulative.Store(cacheKey, currentAmount)
-			p.logger.Debug("validator reward reset detected, updating baseline",
-				"validator", validator,
-				"type", rewardType,
-				"previous", prevAmount.String(),
-				"new_baseline", currentAmount.String(),
-			)
-			return nil
-		}
-
-		// This is a post-withdrawal reward - use currentAmount as increment
-		p.logger.Debug("post-withdrawal validator reward detected",
-			"validator", validator,
-			"type", rewardType,
-			"previous", prevAmount.String(),
-			"current", currentAmount.String(),
-			"using_as_increment", currentAmount.String(),
-		)
-		increment = currentAmount
-	}
-
-	// Update cache with current cumulative value
-	p.validatorRewardCumulative.Store(cacheKey, currentAmount)
-
 	// For validator rewards, sender and recipient are the same (validator receives from distribution)
-	return p.bufferReward(ctx, height, blockTime, validator, validator, increment, rewardType)
+	return p.bufferReward(ctx, height, blockTime, validator, validator, amount, rewardType)
 }
 
 // bufferReward adds a reward record to the unified buffer for batch insert.
