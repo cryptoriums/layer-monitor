@@ -13,6 +13,7 @@ import (
 	blockdb "github.com/cryptoriums/layer-monitor/db"
 	cryptolog "github.com/cryptoriums/layer-monitor/log"
 	"github.com/prometheus/client_golang/prometheus/testutil"
+	"github.com/shopspring/decimal"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/tellor-io/layer/app"
@@ -829,85 +830,80 @@ func TestInsertValidatorReward_Commission(t *testing.T) {
 	p := New(ctx, cryptolog.New(), db)
 	blockTime := time.Now()
 
-	// First event: populate cache baseline (no insert)
-	baselineEvent := abci.Event{
-		Type: "commission",
-		Attributes: []abci.EventAttribute{
-			{Key: AttrKeyAmount, Value: "50.000000loya"},
-			{Key: "validator", Value: "tellorvaloper1abc123def456"},
-		},
+	// The chain emits one commission allocation per block. Each is recorded as
+	// given - there is no baseline block to swallow and no delta to compute.
+	for _, tc := range []struct {
+		height int64
+		amount string
+		want   string
+	}{
+		{99, "50.000000loya", "50"},
+		{100, "173.456789loya", "173.456789"},
+		{101, "20.000000loya", "20"}, // a smaller allocation than the block before
+	} {
+		ev := abci.Event{
+			Type: "commission",
+			Attributes: []abci.EventAttribute{
+				{Key: AttrKeyAmount, Value: tc.amount},
+				{Key: "validator", Value: "tellorvaloper1abc123def456"},
+			},
+		}
+		require.NoError(t, p.insertValidatorReward(ctx, tc.height, blockTime, ev, blockdb.RewardTypeValidatorCommission))
 	}
-	err := p.insertValidatorReward(ctx, 99, blockTime, baselineEvent, blockdb.RewardTypeValidatorCommission)
-	require.NoError(t, err)
-	require.Len(t, fetchRewardsByType(t, db, blockdb.RewardTypeValidatorCommission), 0, "first event should only populate cache")
-
-	// Second event: stores the increment
-	commissionEvent := abci.Event{
-		Type: "commission",
-		Attributes: []abci.EventAttribute{
-			{Key: AttrKeyAmount, Value: "173.456789loya"}, // cumulative 173.456789, prev 50, increment 123.456789
-			{Key: "validator", Value: "tellorvaloper1abc123def456"},
-		},
-	}
-
-	err = p.insertValidatorReward(ctx, 100, blockTime, commissionEvent, blockdb.RewardTypeValidatorCommission)
-	require.NoError(t, err)
-
-	// Flush buffered records to database
 	require.NoError(t, p.Flush(ctx))
 
 	records := fetchRewardsByType(t, db, blockdb.RewardTypeValidatorCommission)
-	require.Len(t, records, 1)
+	require.Len(t, records, 3, "every block's allocation must be recorded")
 
-	// Verify stored values
-	assert.Equal(t, int64(100), records[0].BlockHeight)
-	assert.Equal(t, "tellorvaloper1abc123def456", records[0].Sender)
-	assert.Equal(t, "tellorvaloper1abc123def456", records[0].Recipient)
-	assert.Equal(t, blockdb.RewardTypeValidatorCommission, records[0].RewardType)
+	for i, want := range []struct {
+		height int64
+		amount string
+	}{{99, "50"}, {100, "173.456789"}, {101, "20"}} {
+		assert.Equal(t, want.height, records[i].BlockHeight)
+		assert.Equal(t, want.amount, records[i].Amount, "amount must be stored as emitted, not as a delta")
+		assert.Equal(t, "tellorvaloper1abc123def456", records[i].Sender)
+		assert.Equal(t, "tellorvaloper1abc123def456", records[i].Recipient)
+		assert.Equal(t, blockdb.RewardTypeValidatorCommission, records[i].RewardType)
+	}
 }
 
-func TestInsertValidatorReward_Delegator(t *testing.T) {
+// Guards the bug this replaced: a rising sequence used to be stored as the
+// difference between consecutive blocks, under-reporting earnings by ~40%.
+func TestInsertValidatorReward_DelegatorRecordsFullAmountNotDelta(t *testing.T) {
 	ctx := context.Background()
 	db := setupTestDB(t)
 
 	p := New(ctx, cryptolog.New(), db)
 	blockTime := time.Now()
 
-	// First event: populate cache baseline (no insert)
-	baselineEvent := abci.Event{
-		Type: "rewards",
-		Attributes: []abci.EventAttribute{
-			{Key: AttrKeyAmount, Value: "500.000000loya"},
-			{Key: "validator", Value: "tellorvaloper1xyz789"},
-		},
+	// Deliberately monotonically rising: the old delta logic would have stored
+	// 500, then 1000, then 1000 instead of the full 500/1500/2500.
+	amounts := []string{"500.000000loya", "1500.000000loya", "2500.000000loya"}
+	for i, a := range amounts {
+		ev := abci.Event{
+			Type: "rewards",
+			Attributes: []abci.EventAttribute{
+				{Key: AttrKeyAmount, Value: a},
+				{Key: "validator", Value: "tellorvaloper1xyz789"},
+			},
+		}
+		require.NoError(t, p.insertValidatorReward(ctx, int64(199+i), blockTime, ev, blockdb.RewardTypeValidatorDelegator))
 	}
-	err := p.insertValidatorReward(ctx, 199, blockTime, baselineEvent, blockdb.RewardTypeValidatorDelegator)
-	require.NoError(t, err)
-	require.Len(t, fetchRewardsByType(t, db, blockdb.RewardTypeValidatorDelegator), 0, "first event should only populate cache")
-
-	// Second event: stores the increment
-	rewardsEvent := abci.Event{
-		Type: "rewards",
-		Attributes: []abci.EventAttribute{
-			{Key: AttrKeyAmount, Value: "1500.000000loya"}, // cumulative 1500, prev 500, increment 1000
-			{Key: "validator", Value: "tellorvaloper1xyz789"},
-		},
-	}
-
-	err = p.insertValidatorReward(ctx, 200, blockTime, rewardsEvent, blockdb.RewardTypeValidatorDelegator)
-	require.NoError(t, err)
-
-	// Flush buffered records to database
 	require.NoError(t, p.Flush(ctx))
 
 	records := fetchRewardsByType(t, db, blockdb.RewardTypeValidatorDelegator)
-	require.Len(t, records, 1)
+	require.Len(t, records, 3)
 
-	// Verify stored values
-	assert.Equal(t, int64(200), records[0].BlockHeight)
-	assert.Equal(t, "tellorvaloper1xyz789", records[0].Sender)
-	assert.Equal(t, "tellorvaloper1xyz789", records[0].Recipient)
-	assert.Equal(t, blockdb.RewardTypeValidatorDelegator, records[0].RewardType)
+	total := decimal.Zero
+	for i, want := range []string{"500", "1500", "2500"} {
+		assert.Equal(t, int64(199+i), records[i].BlockHeight)
+		assert.Equal(t, want, records[i].Amount)
+		d, err := decimal.NewFromString(records[i].Amount)
+		require.NoError(t, err)
+		total = total.Add(d)
+	}
+	// 4500, not the 1500 the delta logic produced.
+	assert.Equal(t, "4500", total.String(), "summing per-block allocations must give the full payout")
 }
 
 func TestInsertValidatorReward_MissingValidator(t *testing.T) {
@@ -964,60 +960,35 @@ func TestInsertValidatorReward_MultipleValidators(t *testing.T) {
 		"tellorvaloper1ccc",
 	}
 
-	// First pass: populate cache baselines (no inserts)
-	for i, val := range validators {
-		commEvent := abci.Event{
-			Type: "commission",
-			Attributes: []abci.EventAttribute{
-				{Key: AttrKeyAmount, Value: fmt.Sprintf("%d.000000loya", (i+1)*50)},
-				{Key: "validator", Value: val},
-			},
-		}
-		err := p.insertValidatorReward(ctx, 99, blockTime, commEvent, blockdb.RewardTypeValidatorCommission)
-		require.NoError(t, err)
+	// Two blocks, three validators: every allocation is recorded, so this must
+	// yield 2 blocks x 3 validators x 2 reward types = 12 records.
+	for _, height := range []int64{99, 100} {
+		for i, val := range validators {
+			commEvent := abci.Event{
+				Type: "commission",
+				Attributes: []abci.EventAttribute{
+					{Key: AttrKeyAmount, Value: fmt.Sprintf("%d.000000loya", (i+1)*50)},
+					{Key: "validator", Value: val},
+				},
+			}
+			require.NoError(t, p.insertValidatorReward(ctx, height, blockTime, commEvent, blockdb.RewardTypeValidatorCommission))
 
-		rewEvent := abci.Event{
-			Type: "rewards",
-			Attributes: []abci.EventAttribute{
-				{Key: AttrKeyAmount, Value: fmt.Sprintf("%d.000000loya", (i+1)*500)},
-				{Key: "validator", Value: val},
-			},
+			rewEvent := abci.Event{
+				Type: "rewards",
+				Attributes: []abci.EventAttribute{
+					{Key: AttrKeyAmount, Value: fmt.Sprintf("%d.000000loya", (i+1)*500)},
+					{Key: "validator", Value: val},
+				},
+			}
+			require.NoError(t, p.insertValidatorReward(ctx, height, blockTime, rewEvent, blockdb.RewardTypeValidatorDelegator))
 		}
-		err = p.insertValidatorReward(ctx, 99, blockTime, rewEvent, blockdb.RewardTypeValidatorDelegator)
-		require.NoError(t, err)
-	}
-	require.Len(t, fetchRewards(t, db), 0, "baseline events should not insert")
-
-	// Second pass: now these should insert increments
-	for i, val := range validators {
-		commEvent := abci.Event{
-			Type: "commission",
-			Attributes: []abci.EventAttribute{
-				// cumulative = prev + increment (prev = (i+1)*50, increment = (i+1)*50)
-				{Key: AttrKeyAmount, Value: fmt.Sprintf("%d.000000loya", (i+1)*100)},
-				{Key: "validator", Value: val},
-			},
-		}
-		err := p.insertValidatorReward(ctx, 100, blockTime, commEvent, blockdb.RewardTypeValidatorCommission)
-		require.NoError(t, err)
-
-		rewEvent := abci.Event{
-			Type: "rewards",
-			Attributes: []abci.EventAttribute{
-				// cumulative = prev + increment (prev = (i+1)*500, increment = (i+1)*500)
-				{Key: AttrKeyAmount, Value: fmt.Sprintf("%d.000000loya", (i+1)*1000)},
-				{Key: "validator", Value: val},
-			},
-		}
-		err = p.insertValidatorReward(ctx, 100, blockTime, rewEvent, blockdb.RewardTypeValidatorDelegator)
-		require.NoError(t, err)
 	}
 
 	// Flush buffered records to database
 	require.NoError(t, p.Flush(ctx))
 
 	records := fetchRewards(t, db)
-	assert.Len(t, records, 6, "should record 3 commission + 3 delegator reward events")
+	assert.Len(t, records, 12, "every block must record 3 commission + 3 delegator events")
 }
 
 func TestProcessBlock_ValidatorRewardEvents(t *testing.T) {
@@ -1026,7 +997,7 @@ func TestProcessBlock_ValidatorRewardEvents(t *testing.T) {
 
 	p := New(ctx, cryptolog.New(), db)
 
-	// First block: populate cache baselines (no inserts)
+	// First block: its allocations count like any other block's
 	baselineBlock := ctypes.EventDataNewBlock{
 		Block: &ctypes.Block{
 			Header: ctypes.Header{Height: 99, Time: time.Now()},
@@ -1052,16 +1023,15 @@ func TestProcessBlock_ValidatorRewardEvents(t *testing.T) {
 	}
 	p.ProcessBlock(ctx, baselineBlock)
 	require.NoError(t, p.Flush(ctx)) // Flush any buffered records
-	require.Len(t, fetchRewards(t, db), 0, "baseline block should not insert")
+	require.Len(t, fetchRewards(t, db), 2, "the first block's allocations are real and must be recorded")
 
-	// Second block: these should insert increments
+	// Second block: recorded as emitted, not as a difference from the first
 	blockEv := ctypes.EventDataNewBlock{
 		Block: &ctypes.Block{
 			Header: ctypes.Header{Height: 100, Time: time.Now()},
 		},
 		ResultFinalizeBlock: abci.ResponseFinalizeBlock{
 			Events: []abci.Event{
-				// Commission event: cumulative 75, prev 25, increment 50
 				{
 					Type: "commission",
 					Attributes: []abci.EventAttribute{
@@ -1069,7 +1039,6 @@ func TestProcessBlock_ValidatorRewardEvents(t *testing.T) {
 						{Key: "validator", Value: "tellorvaloper1test"},
 					},
 				},
-				// Rewards event: cumulative 750, prev 250, increment 500
 				{
 					Type: "rewards",
 					Attributes: []abci.EventAttribute{
@@ -1085,21 +1054,23 @@ func TestProcessBlock_ValidatorRewardEvents(t *testing.T) {
 	require.NoError(t, p.Flush(ctx)) // Flush buffered records to database
 
 	records := fetchRewards(t, db)
-	// Should have 2 records: one for commission, one for delegator rewards
-	require.Len(t, records, 2)
+	// 2 blocks x (1 commission + 1 delegator)
+	require.Len(t, records, 4)
 
 	// Records are ordered by type, recipient
 	commRecords := fetchRewardsByType(t, db, blockdb.RewardTypeValidatorCommission)
-	require.Len(t, commRecords, 1)
+	require.Len(t, commRecords, 2)
 	assert.Equal(t, blockdb.RewardTypeValidatorCommission, commRecords[0].RewardType)
 	assert.Equal(t, "tellorvaloper1test", commRecords[0].Sender)
-	assert.Equal(t, int64(100), commRecords[0].BlockHeight)
+	assert.Equal(t, "25", commRecords[0].Amount, "first block stored as emitted")
+	assert.Equal(t, "75", commRecords[1].Amount, "second block stored as emitted, not 75-25")
 
 	delRecords := fetchRewardsByType(t, db, blockdb.RewardTypeValidatorDelegator)
-	require.Len(t, delRecords, 1)
+	require.Len(t, delRecords, 2)
 	assert.Equal(t, blockdb.RewardTypeValidatorDelegator, delRecords[0].RewardType)
 	assert.Equal(t, "tellorvaloper1test", delRecords[0].Sender)
-	assert.Equal(t, int64(100), delRecords[0].BlockHeight)
+	assert.Equal(t, "250", delRecords[0].Amount, "first block stored as emitted")
+	assert.Equal(t, "750", delRecords[1].Amount, "second block stored as emitted, not 750-250")
 }
 
 func TestRecordVoteExtSigs_RecordsOurExplicitMiss(t *testing.T) {
