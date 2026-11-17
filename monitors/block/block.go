@@ -23,7 +23,7 @@ import (
 // BlockFetcher provides block data from an RPC endpoint.
 // This interface enables testing with mocks instead of real RPC connections.
 type BlockFetcher interface {
-	// LatestHeight returns the latest block height on the chain.
+	// LatestHeight returns the latest block height whose results can be fetched.
 	LatestHeight(ctx context.Context) (int64, error)
 	// EarliestHeight returns the lowest block height still retained by the
 	// nodes (the floor below which blocks have been pruned and are no longer
@@ -455,7 +455,8 @@ func (f *rpcFetcher) LatestHeight(ctx context.Context) (int64, error) {
 		case r := <-resCh:
 			if r.err == nil {
 				cancel() // signal other goroutines to stop
-				return r.height, nil
+				// The node may not have saved the newest block results yet.
+				return r.height - 1, nil
 			}
 			errs = append(errs, r.err)
 		case <-ctx.Done():
