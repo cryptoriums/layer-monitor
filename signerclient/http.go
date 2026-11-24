@@ -47,7 +47,7 @@ func FetchAddressHTTP(ctx context.Context, cfg Config, timeout time.Duration) (s
 	if err != nil {
 		return "", fmt.Errorf("GET %s: %w", url, err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		return "", fmt.Errorf("GET %s: %s", url, resp.Status)
 	}
