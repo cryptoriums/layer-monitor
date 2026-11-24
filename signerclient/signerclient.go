@@ -4,8 +4,9 @@
 // (and, optionally, the chain ID) directly from the signer, so the address no
 // longer has to be hand-maintained in the monitor's own config. It only calls
 // read-only endpoints. The gRPC port requires mTLS, so the address is fetched
-// from the signer's plain HTTP /address endpoint instead (FetchAddressHTTP);
-// if that fails the caller falls back to the DB or REPORTER_ADDRESS — see cmd/main.go.
+// from the signer's plain HTTP /address endpoint instead (FetchAddressHTTP).
+// If that fails, the caller falls back to the DB or REPORTER_ADDRESS — see
+// cmd/main.go.
 package signerclient
 
 import (
