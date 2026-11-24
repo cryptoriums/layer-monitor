@@ -3,9 +3,9 @@
 // The monitor uses it at startup to discover the reporter's wallet address
 // (and, optionally, the chain ID) directly from the signer, so the address no
 // longer has to be hand-maintained in the monitor's own config. It only calls
-// read-only endpoints (GetAddress, GetChainID) and connects without TLS. The
-// signer requires mTLS on every connection, so these calls currently fail and
-// the caller falls back to the DB or REPORTER_ADDRESS — see cmd/main.go.
+// read-only endpoints. The gRPC port requires mTLS, so the address is fetched
+// from the signer's plain HTTP /address endpoint instead (FetchAddressHTTP);
+// if that fails the caller falls back to the DB or REPORTER_ADDRESS — see cmd/main.go.
 package signerclient
 
 import (
@@ -37,9 +37,8 @@ type Client struct {
 	signer signerv1.BridgeSignerClient
 }
 
-// Dial connects to the remote signer over an insecure connection. The signer
-// requires mTLS on every connection, so these calls fail against it; the
-// monitor falls back to the DB or REPORTER_ADDRESS for the wallet address.
+// Dial connects to the remote signer's gRPC port over an insecure connection.
+// The signer requires mTLS there, so use FetchAddressHTTP for the address.
 // The returned Client must be Closed.
 func Dial(cfg Config) (*Client, error) {
 	conn, err := grpc.NewClient(cfg.Addr, grpc.WithTransportCredentials(insecure.NewCredentials()))

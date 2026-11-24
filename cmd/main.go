@@ -291,18 +291,19 @@ const signerQueryTimeout = 5 * time.Second
 // resolveWalletAddress determines the reporter wallet address at startup.
 //
 // Order of precedence:
-//  1. The remote signer (authoritative — it holds the key). On success the
+//  1. The remote signer's HTTP /address endpoint (authoritative — it holds
+//     the key). On success the
 //     address is persisted to the DB so it survives a later signer outage.
 //  2. The address already stored in the DB (fallback when the signer is
 //     unconfigured or unreachable).
 //  3. The REPORTER_ADDRESS environment variable (last resort, e.g. when the
-//     signer rejects the monitor and the DB row has expired).
+//     signer is unreachable and the DB row has expired).
 //
 // Returns "" only when none of these sources yields an address; the caller treats
 // that as fatal.
 func resolveWalletAddress(ctx context.Context, logger log.Logger, database db.Db, cfg signerclient.Config) string {
 	if cfg.Enabled() {
-		addr, err := signerclient.FetchAddressWithTimeout(ctx, cfg, signerQueryTimeout)
+		addr, err := signerclient.FetchAddressHTTP(ctx, cfg, signerQueryTimeout)
 		if err != nil {
 			logger.Warn("could not fetch wallet address from remote signer, falling back to DB",
 				"signer_addr", cfg.Addr, "error", err)
