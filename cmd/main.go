@@ -123,7 +123,7 @@ func runMonitor(cmd *cobra.Command, _ []string) {
 	if walletAddress == "" {
 		logger.Error("could not determine reporter wallet address from the remote signer or the DB - refusing to start",
 			"reason", "the wallet address is required for validator/reporter metrics, alerts, and the status page",
-			"solution", "make the remote signer reachable (REMOTE_SIGNER_ADDR + mTLS certs), or ensure the reporter has run at least once so the address is stored in the DB")
+			"solution", "set REPORTER_ADDRESS, make the remote signer reachable (REMOTE_SIGNER_ADDR), or ensure the address is stored in the DB")
 		os.Exit(1)
 	}
 
@@ -291,21 +291,24 @@ const signerQueryTimeout = 5 * time.Second
 // resolveWalletAddress determines the reporter wallet address at startup.
 //
 // Order of precedence:
-//  1. The remote signer (authoritative — it holds the key). On success the
-//     address is persisted to the DB so it survives a later signer outage.
+//  1. The remote signer's HTTP /address endpoint (authoritative — it holds
+//     the key). On success the address is persisted to the DB so it
+//     survives a later signer outage.
 //  2. The address already stored in the DB (fallback when the signer is
 //     unconfigured or unreachable).
+//  3. The REPORTER_ADDRESS environment variable (last resort, e.g. when the
+//     signer is unreachable and the DB row has expired).
 //
-// Returns "" only when neither source yields an address; the caller treats
+// Returns "" only when none of these sources yields an address; the caller treats
 // that as fatal.
 func resolveWalletAddress(ctx context.Context, logger log.Logger, database db.Db, cfg signerclient.Config) string {
 	if cfg.Enabled() {
-		addr, err := signerclient.FetchAddressWithTimeout(ctx, cfg, signerQueryTimeout)
+		addr, err := signerclient.FetchAddressHTTP(ctx, cfg, signerQueryTimeout)
 		if err != nil {
 			logger.Warn("could not fetch wallet address from remote signer, falling back to DB",
-				"signer_addr", cfg.Addr, "error", err)
+				"signer_addr", cfg.HTTPAddr(), "error", err)
 		} else {
-			logger.Info("reporter address fetched from remote signer", "wallet", addr, "signer_addr", cfg.Addr)
+			logger.Info("reporter address fetched from remote signer", "wallet", addr, "signer_addr", cfg.HTTPAddr())
 			if err := db.UpsertAddress(ctx, database, db.AddressNameReporter, addr); err != nil {
 				// Non-fatal: we already have the address; persisting is a convenience
 				// so the next startup can fall back to it if the signer is down.
@@ -319,11 +322,16 @@ func resolveWalletAddress(ctx context.Context, logger log.Logger, database db.Db
 
 	addr, err := db.ReporterAddr(ctx, database)
 	if err != nil {
-		logger.Error("failed to read reporter address from DB", "error", err)
-		return ""
+		logger.Warn("failed to read reporter address from DB", "error", err)
 	}
 	if addr != "" {
 		logger.Info("reporter address read from DB", "wallet", addr)
+		return addr
+	}
+
+	addr = os.Getenv("REPORTER_ADDRESS")
+	if addr != "" {
+		logger.Info("reporter address read from REPORTER_ADDRESS", "wallet", addr)
 	}
 	return addr
 }
